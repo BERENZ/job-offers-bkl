@@ -10,11 +10,15 @@ editor_options:
 ```{r}
 library(tidyverse)
 library(data.table)
+library(readxl)
+```
 
-dane <- fread("../data-raw/POPYT_POZNAN_2011_2017.csv") %>%
+Read raw data
+```{r}
+gus_woj <- fread("../data-raw/POPYT_POZNAN_2011_2017.csv") %>%
   rename( kwartal = 3, woj = 4) %>%
   select(rok = ROK, kwartal, woj, ends_with("1"), -P6_011, -V1) %>%
-  filter(rok == 2017, woj != "POLSKA") %>%
+  filter(rok %in% 2011:2014, kwartal == 1, woj != "POLSKA") %>%
   mutate(woj = str_pad(woj,2,"0",side = "left")) %>%
   gather(zawody, liczba, -rok, -kwartal,-woj)  %>%
   mutate(zawody = str_replace(zawody, "P6_",""),
@@ -30,5 +34,48 @@ dane <- fread("../data-raw/POPYT_POZNAN_2011_2017.csv") %>%
                             zawody %in% 33:35 ~ 8,
                             zawody %in% 36:41 ~ 9)) %>%
   group_by(rok, kwartal, woj, zawod1) %>%
-  mutate(zawod2 = paste0```
+  mutate(zawod2 = paste0(zawod1, row_number())) %>%
+  ungroup() 
+```
+
+
+
+Read data from excel spreadsheets
+
+```{r}
+dir(path = "../data-raw", pattern = "*00", full.names = T) %>%
+  set_names(basename(.)) %>%
+  map_df(~read_excel(path = .x, sheet = "Arkusz5", skip = 9, col_names = F) %>%
+            filter(`...1` != "OGÓŁEM") %>%
+            set_names(nm = c("zawod","ogolem", LETTERS[1:19])) %>%
+            select(-ogolem) %>%
+            mutate(kod = str_extract(zawod, "\\d{1,2}\\."),
+                   kod = str_replace(kod, "\\.", ""),
+                   kod = as.numeric(kod)) %>%
+            filter(kod > 10) %>%
+            gather(sekcja, wolne, -kod, -zawod) %>%
+            filter(wolne > 0), 
+         .id = "rok") %>%
+  mutate(rok = readr::parse_number(rok),
+         kod1 = substr(kod, 1,1))  %>%
+  rename(kod2 = kod) %>%
+  select(rok, kod1, kod2, zawod, sekcja, wolne) -> gus_sek
+```
+
+```{r}
+gus_sek %>%
+  count(kod2, wt = wolne)
+```
+
+
+Joining two things together
+
+```{r}
+gus_sek %>%
+  select(-zawod) %>%
+  mutate(kod1 = as.numeric(kod1)) %>%
+  bind_rows(gus_woj %>% 
+              mutate(kod2 = as.numeric(zawod2)) %>%
+              select(rok, woj, kod1 = zawod1, kod2 , woj, wolne = liczba)) -> gus_dane
+```
 
