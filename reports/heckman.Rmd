@@ -1,0 +1,217 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r}
+library(sampleSelection)
+library(tidyverse)
+library(miceMNAR)
+```
+
+```{r}
+bkl_imputed <- readRDS('../data/bkl-imputed-data.rds') %>%
+  filter(zawod9 != 6, 
+         zrodlo == 1, 
+         rok %in% c(2011,2013,2014),
+         zawod_2_imp != '20',
+         nace != 'U') 
+
+bkl_imputed
+```
+
+```{r}
+bkl_imputed %>%
+  filter(rok == 2014) %>%
+  count(occupation = zawod9, woj, interpersonal = komp_interpersonalne) %>%
+  mutate(sample = TRUE) %>%
+  bind_rows (
+    readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+      filter(rok  == 2014, kw == 1) %>%
+      count(occupation= group, woj, wt = total) %>%
+      mutate(sample = FALSE) 
+  )  %>%
+  filter(occupation != 6) %>%
+  mutate(occupation = factor(occupation),
+         woj = factor(woj)) %>%
+  as.data.frame() -> sample_sel
+
+sample_sel_long <- sample_sel[rep(x = 1:nrow(sample_sel), times = sample_sel$n),] 
+
+JointModelEq <- generate_JointModelEq(data = sample_sel_long, varMNAR = "interpersonal")
+
+JointModelEq[,"interpersonal_var_sel"] <- c(1, 1, 0, 0, 0)
+JointModelEq[,"interpersonal_var_out"] <- c(1, 0, 0, 0, 0)
+
+arg <- MNARargument(data = sample_sel_long,
+                    varMNAR = "interpersonal",
+                    JointModelEq = JointModelEq)
+
+
+imputation <- mice(data = arg$data_mod,
+                   method = arg$method,
+                   predictorMatrix = arg$predictorMatrix,
+                   JointModelEq = arg$JointModelEq,
+                   control = arg$control,
+                   maxit = 100, 
+                   m = 10,
+                   seed = 123)
+
+sample_sel_long %>%
+  filter(sample) %>%
+  count(interpersonal) %>%
+  mutate(p = nn / sum(nn))
+
+
+mice::complete(imputation) %>%
+  count(interpersonal) %>%
+  mutate(p = nn / sum(nn))
+
+
+sample_sel %>%
+  filter(sample) %>%
+  spread(interpersonal, n, fill = 0) %>%
+  mutate(sample = `0` + `1`) %>%
+  left_join(sample_sel %>%
+  count(occupation, woj, wt = n)) %>%
+  mutate(w = nn / sample) %>%
+  ungroup() %>%
+  
+  summarise(non = sum(`0` * w),
+  yes = sum(`1` * w)) %>%
+  mutate(p = yes / (yes + non))
+
+
+```
+
+
+
+```{r}
+bkl_imputed %>%
+  filter(rok == 2014) %>%
+  count(occupation = zawod9, woj, technical = komp_techniczne) %>%
+  mutate(sample = TRUE) %>%
+  bind_rows (
+    readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+      filter(rok  == 2014, kw == 1) %>%
+      count(occupation= group, woj, wt = total) %>%
+      mutate(sample = FALSE) 
+  )  %>%
+  filter(occupation != 6) %>%
+  mutate(occupation = factor(occupation),
+         woj = factor(woj)) %>%
+  as.data.frame() -> sample_sel
+
+sample_sel_long <- sample_sel[rep(x = 1:nrow(sample_sel), times = sample_sel$n),] 
+
+JointModelEq <- generate_JointModelEq(data = sample_sel_long, varMNAR = "technical")
+
+JointModelEq[,"technical_var_sel"] <- c(1, 1, 0, 0, 0)
+JointModelEq[,"technical_var_out"] <- c(1, 0, 0, 0, 0)
+
+arg <- MNARargument(data = sample_sel_long,
+                    varMNAR = "technical",
+                    JointModelEq = JointModelEq)
+
+
+imputation <- mice(data = arg$data_mod,
+                   method = arg$method,
+                   predictorMatrix = arg$predictorMatrix,
+                   JointModelEq = arg$JointModelEq,
+                   control = arg$control,
+                   maxit = 100, 
+                   m = 10,
+                   seed = 123)
+
+sample_sel_long %>%
+  filter(sample) %>%
+  count(technical) %>%
+  mutate(p = nn / sum(nn))
+
+
+mice::complete(imputation) %>%
+  count(technical) %>%
+  mutate(p = nn / sum(nn))
+
+
+sample_sel %>%
+  filter(sample) %>%
+  spread(technical, n, fill = 0) %>%
+  mutate(sample = `0` + `1`) %>%
+  left_join(sample_sel %>%
+  count(occupation, woj, wt = n)) %>%
+  mutate(w = nn / sample) %>%
+  ungroup() %>%
+  
+  summarise(non = sum(`0` * w),
+  yes = sum(`1` * w)) %>%
+  mutate(p = yes / (yes + non))
+
+```
+
+```{r}
+bkl_imputed %>%
+  filter(rok == 2014) %>%
+  count(occupation = zawod9, woj, menag = komp_kierownicze) %>%
+  mutate(sample = TRUE) %>%
+  bind_rows (
+    readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+      filter(rok  == 2014, kw == 1) %>%
+      count(occupation= group, woj, wt = total) %>%
+      mutate(sample = FALSE) 
+  )  %>%
+  filter(occupation != 6) %>%
+  mutate(occupation = factor(occupation),
+         woj = factor(woj)) %>%
+  as.data.frame() -> sample_sel
+
+sample_sel_long <- sample_sel[rep(x = 1:nrow(sample_sel), times = sample_sel$n),] 
+
+JointModelEq <- generate_JointModelEq(data = sample_sel_long, varMNAR = "menag")
+
+JointModelEq[,"menag_var_sel"] <- c(1, 1, 0, 0, 0)
+JointModelEq[,"menag_var_out"] <- c(1, 0, 0, 0, 0)
+
+arg <- MNARargument(data = sample_sel_long,
+                    varMNAR = "menag",
+                    JointModelEq = JointModelEq)
+
+
+imputation <- mice(data = arg$data_mod,
+                   method = arg$method,
+                   predictorMatrix = arg$predictorMatrix,
+                   JointModelEq = arg$JointModelEq,
+                   control = arg$control,
+                   maxit = 100, 
+                   m = 10,
+                   seed = 123)
+
+sample_sel_long %>%
+  filter(sample) %>%
+  count(menag) %>%
+  mutate(p = nn / sum(nn))
+
+
+mice::complete(imputation) %>%
+  count(menag) %>%
+  mutate(p = nn / sum(nn))
+
+
+sample_sel %>%
+  filter(sample) %>%
+  spread(menag, n, fill = 0) %>%
+  mutate(sample = `0` + `1`) %>%
+  left_join(sample_sel %>%
+  count(occupation, woj, wt = n)) %>%
+  mutate(w = nn / sample) %>%
+  ungroup() %>%
+  
+  summarise(non = sum(`0` * w),
+  yes = sum(`1` * w)) %>%
+  mutate(p = yes / (yes + non))
+
+```
+

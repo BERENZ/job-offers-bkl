@@ -1,0 +1,270 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+# Packages 
+
+```{r}
+library(tidyverse)
+library(VIM)
+```
+
+# Data
+
+```{r}
+bkl_oferty <- readRDS('../data/bkl-oferty.rds') %>%
+  filter(!is.na(woj), woj !=0) %>%
+  mutate(zawod9  = ifelse(!is.na(zawod), substr(zawod,1,1), zawod_9grup))  %>%
+  filter(!is.na(zawod9))
+
+bkl_oferty %>%
+  count(rok,zrodlo) %>%
+  spread(rok, n) %>%
+  xtable::xtable()
+
+bkl_oferty %>%
+  select(rok, starts_with('komp_'), zawod9, -komp_zawodowe, zrodlo) %>%
+  gather(komp, value, -rok,-zrodlo) %>%
+  count(rok, zrodlo, komp, value) %>%
+  group_by(rok, zrodlo, komp) %>%
+  mutate(p = n/sum(n)) %>%
+  filter(value ==1) %>%
+  select(-n) %>%
+  spread(zrodlo, p)
+
+
+bkl_oferty %>%
+  filter(zrodlo == 1) %>%
+  dplyr::select(starts_with('komp_')) %>%
+  rowSums() %>%
+  table() %>%
+  prop.table()*100
+
+bkl_oferty %>%
+  filter(zrodlo == 2) %>%
+  dplyr::select(starts_with('komp_')) %>%
+  rowSums() %>%
+  table() %>%
+  prop.table()*100
+
+```
+
+```{r}
+bkl_oferty %>%
+  filter(rok > 2010) %>%
+  select(rok, zawod9, starts_with('komp_')) %>%
+  na.omit() %>%
+  gather(komp, value, -zawod9,-rok) %>%
+  count(rok, zawod9, komp, value) %>%
+  filter(value == 1) %>%
+  filter(zawod9 !=6) %>%
+  xtabs(n~zawod9 + komp + rok, data = .) %>%
+  #chisq.test(simulate.p.value = T) %>%
+  vcd::assocstats() 
+
+bkl_oferty %>%
+  filter(rok > 2010) %>%
+  select(rok, woj, starts_with('komp_')) %>%
+  na.omit() %>%
+  gather(komp, value, -woj,-rok) %>%
+  count(rok, woj, komp, value) %>%
+  filter(value == 1) %>%
+  xtabs(n~woj + komp + rok, data = .) %>%
+  #chisq.test(simulate.p.value = T) %>%
+  vcd::assocstats() 
+
+```
+
+
+# Imputacja
+
+## Hot-deck 
+
+Imputacja metodą hot-deck (w pierwszej kolejności)
+
+```{r}
+bkl_oferty_imp <- hotdeck(data = bkl_oferty %>% 
+                            filter(rok != 2012) %>% 
+                            mutate(sekcja_pkd_imp = as.character(sekcja_pkd), 
+                                   branza_imp = as.character(branza)),
+                          variable = c('sekcja_pkd_imp', 'branza_imp'), 
+                          domain_var = 'zawod', 
+                          donorcond = list('>5'))
+
+
+bkl_oferty_imp  %>%
+  #filter(zawod == '121301')
+  #filter(sekcja_pkd_imp == 1)  %>%
+  #arrange(zawod)
+  count(branza,branza_imp) %>%
+  filter(branza_imp == 1)
+```
+
+Ustalamy braki danych, które chcemy imputować knn
+
+```{r}
+bkl_oferty_imp <- bkl_oferty_imp %>%
+  mutate(branza_imp = ifelse(branza_imp == 1 & is.na(branza), NA, branza_imp),
+         sekcja_pkd_imp = ifelse(sekcja_pkd_imp == 1, NA, sekcja_pkd_imp)) %>%
+  select(-sekcja_pkd_imp_imp,-branza_imp_imp)
+```
+
+
+## knn imputation
+
+```{r}
+set.seed(123)
+knn_imp <- kNN(data = bkl_oferty_imp %>% mutate(zawod = as.numeric(zawod)),
+               variable = c('sekcja_pkd_imp','branza_imp'),
+               dist_var = c('zawod','komp_zawodowe','komp_techniczne','komp_matematyczne','komp_kulturalne',
+                            'komp_komputerowe','komp_kognitywne','komp_kierownicze','komp_interpersonalne',
+                            'komp_indywidualne','komp_fizyczne','komp_dyspozycyjne','komp_biurowe'),
+               trace = TRUE,
+               addRandom = TRUE)
+```
+
+```{r}
+knn_imp 
+```
+
+## compare results
+
+
+
+Compare distributions after imputation
+
+```{r}
+knn_imp %>%
+  count(sekcja_pkd_imp) %>%
+  left_join(
+    knn_imp %>%
+      filter(!sekcja_pkd_imp_imp) %>%
+      count(sekcja_pkd_imp=sekcja_pkd) %>%
+      rename(n_przed = n)
+  ) %>%
+  na.omit() %>%
+  mutate(p = n / sum(n),
+         p_przed = n_przed / sum(n_przed)) %>%
+  ggplot(data = .,
+         aes(x = p_przed,
+             y = p)) +
+  geom_point() +
+  geom_abline()
+```
+
+
+
+# Merge data into one file
+
+```{r}
+bkl_oferty_imputed <- knn_imp %>%
+  select(-sekcja_pkd_imp_imp,-branza_imp_imp) %>%
+  bind_rows(
+    bkl_oferty %>%
+      filter(rok == 2012)
+  ) %>%
+  mutate_at(vars(sekcja_pkd,branza,sekcja_pkd_imp,branza_imp),
+            as.numeric) 
+
+bkl_oferty_imputed
+```
+
+```{r}
+attributes(bkl_oferty_imputed$zrodlo_dokladne) <- attributes(bkl_oferty$zrodlo_dokladne)
+attributes(bkl_oferty_imputed$woj) <- attributes(bkl_oferty$woj)
+attributes(bkl_oferty_imputed$podregion) <- attributes(bkl_oferty$podregion)
+attributes(bkl_oferty_imputed$forma_ogl) <- attributes(bkl_oferty$forma_ogl)
+attributes(bkl_oferty_imputed$staz) <- attributes(bkl_oferty$staz)
+attributes(bkl_oferty_imputed$czy_pracodawca) <- attributes(bkl_oferty$czy_pracodawca)
+attributes(bkl_oferty_imputed$czy_ogloszeniodawca) <- attributes(bkl_oferty$czy_ogloszeniodawca)
+
+attributes(bkl_oferty_imputed$sekcja_pkd_imp) <- attributes(bkl_oferty$sekcja_pkd)
+attr(bkl_oferty_imputed$sekcja_pkd_imp,'labels') <- as.numeric(attr(bkl_oferty$sekcja_pkd,'labels'))
+attr(attr(bkl_oferty_imputed$sekcja_pkd_imp,'labels'),'names') <- attr(attr(bkl_oferty$sekcja_pkd,'labels'),'names')
+
+attributes(bkl_oferty_imputed$zawod) <- attributes(bkl_oferty$zawod)
+attr(bkl_oferty_imputed$zawod,'labels') <- as.numeric(attr(bkl_oferty$zawod,'labels'))
+attr(attr(bkl_oferty_imputed$zawod,'labels'),'names') <- attr(attr(bkl_oferty$zawod,'labels'),'names')
+
+attributes(bkl_oferty_imputed$branza_imp) <- attributes(bkl_oferty$branza)
+attr(bkl_oferty_imputed$branza_imp,'labels') <- as.numeric(attr(bkl_oferty$branza,'labels'))
+attr(attr(bkl_oferty_imputed$branza_imp,'labels'),'names') <- attr(attr(bkl_oferty$branza,'labels'),'names')
+
+
+bkl_oferty_imputed %>%
+  count(branza_imp, as_factor(branza_imp), rok)
+```
+
+## Information about PKD
+
+```{r}
+pkd <- readxl::read_excel('../data-raw/pkd2007.xls', sheet = 3) %>%
+  select(symbol, nazwa) %>%
+      mutate(nazwa = stringi::stri_trim_both(tolower(nazwa)),
+             sekcja_pkd_glowna = ifelse(grepl('^[A-Z]$',symbol),symbol,NA),
+             sekcja_pkd_dzial = ifelse(grepl('^\\d{2}$', symbol), symbol,NA)) %>%
+  fill(sekcja_pkd_glowna) %>%
+  group_by(sekcja_pkd_glowna) %>%
+  fill(sekcja_pkd_dzial) %>%
+  fill(sekcja_pkd_dzial, .direction = 'up') %>%
+  count(symbol,sekcja_pkd_glowna,sekcja_pkd_dzial,nazwa) %>%
+  select(-n) %>%
+  ungroup()
+pkd 
+```
+
+```{r}
+bkl_oferty_imputed <- bkl_oferty_imputed %>%
+  ungroup() %>%
+  mutate(sekcja_pkd_imp_label = as_factor(sekcja_pkd_imp),
+         sekcja_pkd_imp_code = gsub('^(\\d{2})(\\d{1})$', '\\1\\.\\2', sekcja_pkd_imp)) %>%
+  left_join(
+    pkd %>%
+      count(sekcja_pkd_glowna,sekcja_pkd_dzial,nazwa) %>% 
+      select(-n) %>% 
+      ungroup(),
+    by = c('sekcja_pkd_imp_label'='nazwa')
+  )  %>%
+  left_join(
+    pkd %>%
+      select(symbol, sekcja_pkd_glowna, sekcja_pkd_dzial),
+    by = c('sekcja_pkd_imp_code'='symbol')
+  ) %>%
+  mutate(sekcja_pkd_glowna = ifelse(is.na(sekcja_pkd_glowna.x),sekcja_pkd_glowna.y,sekcja_pkd_glowna.x),
+         sekcja_pkd_dzial = ifelse(is.na(sekcja_pkd_dzial.x),sekcja_pkd_dzial.y,sekcja_pkd_dzial.x)) %>%
+  select(-sekcja_pkd_glowna.x,-sekcja_pkd_glowna.y,-sekcja_pkd_dzial.x,-sekcja_pkd_dzial.y) %>%
+  mutate(sekcja_pkd_glowna = ifelse(sekcja_pkd_imp_label == 'pozostałe górnictwo i wydobywanie','B',sekcja_pkd_glowna),
+         sekcja_pkd_dzial = ifelse(sekcja_pkd_imp_label == 'pozostałe górnictwo i wydobywanie','08',sekcja_pkd_dzial),
+         sekcja_pkd_glowna = ifelse(grepl('działalność związana z administracyjną obsługą biura i pozostała działalność', sekcja_pkd_imp_label),'N',sekcja_pkd_glowna),
+         sekcja_pkd_dzial = ifelse(grepl('działalność związana z administracyjną obsługą biura i pozostała działalność', sekcja_pkd_imp_label),'82',sekcja_pkd_dzial),
+         sekcja_pkd_glowna = ifelse(grepl('działalność organizatorów turystyki, pośredników i agentów turystycznych oraz pozostała', sekcja_pkd_imp_label),'N',sekcja_pkd_glowna),
+         sekcja_pkd_dzial = ifelse(grepl('działalność organizatorów turystyki, pośredników i agentów turystycznych oraz pozostała', sekcja_pkd_imp_label),'79',sekcja_pkd_dzial)) 
+
+bkl_oferty_imputed  %>%
+  filter(substr(as.numeric(zawod),1,2) == '2e')
+```
+
+```{r}
+saveRDS(object = bkl_oferty_imputed, file = '../data/bkl-oferty-imputed.rds')
+```
+
+```{r}
+bkl_oferty_imputed <- readRDS('../data/bkl-oferty-imputed.rds')
+bkl_oferty_imputed
+```
+
+```{r}
+bkl_oferty_imputed %>%
+  count(rok, sekcja_pkd_glowna) %>%
+  spread(sekcja_pkd_glowna, n)
+```
+
+```{r}
+bkl_oferty_imputed %>%
+  filter(rok == 2012)
+```
+

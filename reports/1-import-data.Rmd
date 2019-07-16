@@ -1,0 +1,462 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Pakiety
+
+```{r}
+library(tidyverse)
+library(haven)
+options(max.print = 500)
+```
+
+# Kluczowe zmienne
+
+Zmienne, które nas interesują:
+
+- identyfikator oferty
+- źródło
+- dokładne źródło
+- woj
+- podregion
+- sekcja PKD
+- nazwa pracodawcy
+- kod zawodu
+
+- wykształcenie
+- staż / doświadczenie
+- certyfikaty / dyplomy
+- dodatkowe zasoby
+- kompetencje
+- jezyki
+
+
+```{r}
+dane2010 <- read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_1ed.sav') %>%
+  select(-WOJ) %>%
+  setNames(nm = tolower(names(.)))  %>%
+  rename(plik = n1,
+         zrodlo = zrodlo_ogloszenia,
+         zrodlo_dokladne = nazwa_zrodla,
+         zawod = `zawód_kzis`,
+         zawod_9grup = `zawod_9grupkzis`,
+         woj = nts3,
+         podregion = nts4,
+         sekcja_pkd = `ogłoszeniodawca_pkd`,
+         branza = branża_źródło,
+         czy_pracodawca = nazwa_pracodawcy,
+         czy_ogloszeniodawca = nazwa_ogłoszeniodawcy,
+         #zatrudnienie_typ  = ZATRUDNIENIE_TYP,
+         #umowa_rodzaj = RODZAJ_UMOWY,
+         #zasoby = ZASOBY,
+         jezyk = jezyki_obce, ## trzeba go przekodowac
+         staz = staz,
+         wyksztalcenie = wyksztalcenie_poziom,
+         komp_zawodowe = kompetencje_zawodowe,
+         komp_techniczne = kompetencje_techniczne,
+         komp_matematyczne = kompetencje_matematyczne,
+         komp_kulturalne = kompetencje_kulturalne,
+         komp_komputerowe = kompetencje_komputerowe,
+         komp_kognitywne = kompetencje_kognitywne,
+         komp_kierownicze = kompetencje_kierownicze,
+         komp_interpersonalne = kompetencje_interpersonalne,
+         komp_indywidualne = kompetencje_indywidualne,
+         komp_fizyczne = kompetencje_fizyczne,
+         komp_dyspozycyjne = kompetencje_dyspozycyjne,
+         komp_biurowe = kompetencje_biurowe) %>%
+  mutate(jezyk_angielski = jezyk == 25,
+         jezyk_niemiecki = jezyk == 14,
+         rok = 2010,
+         wyksztalcenie = case_when(wyksztalcenie == 1 ~ 'podstawowe lub brak',
+                                    wyksztalcenie == 2 ~ 'zasadnicze',
+                                    wyksztalcenie %in% 3:4 ~ 'srednie',
+                                    wyksztalcenie %in% 5:6 ~ 'lic/inz',
+                                    wyksztalcenie %in% 7:8 ~ 'wyzsze')) %>%
+  select(plik, rok, zrodlo, zrodlo_dokladne, zawod, zawod_9grup, woj, podregion, sekcja_pkd, 
+         branza, czy_pracodawca, czy_ogloszeniodawca, staz, wyksztalcenie, 
+         jezyk_angielski, jezyk_niemiecki,
+         komp_zawodowe, 
+         komp_techniczne, komp_matematyczne, komp_kulturalne, komp_komputerowe, komp_kognitywne, 
+         komp_kierownicze, komp_interpersonalne, komp_indywidualne, komp_fizyczne, komp_dyspozycyjne, komp_biurowe)
+
+dane2010
+``` 
+
+```{r}
+dane2011 <- read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_2ed.sav') %>%
+  rename(plik = intnr,
+         forma_ogl = Q2a,
+         zrodlo = forma_ogłoszenia,
+         zrodlo_dokladne = Q2b,
+         zawod = Q5_ISCO,
+         zawod_9grup = Q5_KOD_ISCO9,
+         zawod_40grup = Q5_KOD_ISCO40,
+         #zatrudnienie_typ  = ZATRUDNIENIE_TYP,
+         #zasoby = ZASOBY,
+         wyksztalcenie = wyksztalcenie_poziom,
+         woj = nts3,
+         podregion = nts4,
+         #umowa_rodzaj = RODZAJ_UMOWY,
+         sekcja_pkd = `kodpkd`,
+         branza = Q4a,
+         czy_pracodawca = Q3A,
+         czy_ogloszeniodawca = Q3c,
+         #jezyk = JEZYKI_OBCE,
+         jezyk_angielski = `język_angielski`,
+         jezyk_niemiecki = `język_niemiecki`,
+         staz = doswiadczenie,
+         komp_zawodowe = `ZAW_ogólne_DYCH`,
+         komp_techniczne = TECH,
+         komp_matematyczne = MAT,
+         komp_kulturalne = KUL,
+         komp_komputerowe = KOM,
+         komp_kognitywne = KOG,
+         komp_kierownicze = KIER,
+         komp_interpersonalne = INT,
+         komp_indywidualne = SAM,
+         komp_fizyczne = FIZ,
+         komp_dyspozycyjne = DYS,
+         komp_biurowe = BIUR) %>%
+  select(plik, forma_ogl, zrodlo, zrodlo_dokladne, zawod, zawod_9grup, zawod_40grup,  wyksztalcenie, 
+         woj, podregion, sekcja_pkd, branza, czy_pracodawca, czy_ogloszeniodawca, jezyk_angielski, jezyk_niemiecki, 
+         staz, komp_zawodowe, komp_techniczne, komp_matematyczne, komp_kulturalne, komp_komputerowe, 
+         komp_kognitywne, komp_kierownicze, komp_interpersonalne, komp_indywidualne, komp_fizyczne, komp_dyspozycyjne, komp_biurowe)%>%
+  mutate(rok = 2011,
+         wyksztalcenie = case_when(wyksztalcenie %in% c(1,97) ~ 'podstawowe lub brak',
+                                    wyksztalcenie == 2 ~ 'zasadnicze',
+                                    wyksztalcenie %in% 3:4 ~ 'srednie',
+                                    wyksztalcenie %in% 5:6 ~ 'lic/inz',
+                                    wyksztalcenie %in% 7:9 ~ 'wyzsze'))
+dane2011 %>%
+  count(sekcja_pkd, as_factor(sekcja_pkd))
+```
+
+## Dane 2012
+
+```{r}
+dane2012 <- read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_3ed.sav') %>%
+  select(-woj) %>% 
+  rename(zrodlo = `Źródło_ogłoszenia`,
+         zrodlo_dokladne = Q2b,
+         #zawod = Q5_ISCO,
+         zawod_9grup = ISC0_gł,
+         #zawod_40grup = Q5_KOD_ISCO40,
+         #zatrudnienie_typ  = ZATRUDNIENIE_TYP,
+         #zasoby = ZASOBY,
+         wyksztalcenie = `Wykształcenie`,
+         woj = nts3,
+         podregion = nts4,
+         #umowa_rodzaj = RODZAJ_UMOWY,
+         sekcja_pkd = `kodpkd`,
+         branza = Q4a,
+         #czy_pracodawca = Q3A,
+         #czy_ogloszeniodawca = Q3c,
+         #jezyk = JEZYKI_OBCE,
+         jezyk_angielski = `Angielski`,
+         jezyk_niemiecki = `Niemiecki`,
+         staz = `Doświadczenie`,
+         komp_zawodowe = `Kom_zaw_gł`,
+         komp_techniczne = `Kom_tech_gł`,
+         komp_matematyczne = `Kom_matm_gł`,
+         komp_kulturalne = `Kom_kul_gł`,
+         komp_komputerowe = `Kom_komp_gł`,
+         komp_kognitywne = `Kom_kog_główne`,
+         komp_kierownicze = `Kom_kier_gł`,
+         komp_interpersonalne = `Kom_inter_gł`,
+         komp_indywidualne = `Kom_ind_główne`,
+         komp_fizyczne = `Kom_fiz_gł`,
+         komp_dyspozycyjne = `Kom_dys_gł`,
+         komp_biurowe = `Kom_biur_gł`) %>%
+  mutate_at(vars(starts_with('komp_')),
+            funs(ifelse(is.na(.),0,.))) %>%
+  select(zrodlo, zrodlo_dokladne, zawod_9grup, wyksztalcenie, woj, podregion, sekcja_pkd, branza, 
+         jezyk_angielski, jezyk_niemiecki, staz, komp_zawodowe, komp_techniczne, 
+         komp_matematyczne, komp_kulturalne, komp_komputerowe, komp_kognitywne, komp_kierownicze, 
+         komp_interpersonalne, komp_indywidualne, komp_fizyczne, komp_dyspozycyjne, komp_biurowe)%>%
+  mutate(rok = 2012,
+         zrodlo = ifelse(is.na(zrodlo), 2, zrodlo),
+         wyksztalcenie = case_when(wyksztalcenie == 1 ~ 'podstawowe lub brak',
+                                    wyksztalcenie == 2 ~ 'zasadnicze',
+                                    wyksztalcenie %in% 3:5 ~ 'srednie',
+                                    wyksztalcenie %in% 7 ~ 'lic/inz',
+                                    wyksztalcenie %in% c(6,8) ~ 'wyzsze')) ## PUP Kraków 
+dane2012  %>%
+  count(branza,as_factor(branza))
+```
+
+```{r}
+str(dane2012,1)
+
+```
+
+
+
+## Dane 2013
+
+
+```{r}
+dane2013 <- read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_4ed.sav') %>%
+  select(-woj) %>% 
+  rename(zrodlo = zrodlo_oferty,
+         forma_ogl = Q2a,
+         zrodlo_dokladne = Q2b,
+         zawod = Q5_ISCO,
+         zawod_9grup = ISCO_grupy_wielkie,
+         #zawod_40grup = Q5_KOD_ISCO40,
+         #zatrudnienie_typ  = ZATRUDNIENIE_TYP,
+         #zasoby = ZASOBY,
+         wyksztalcenie = `Poziom_wykształcenia_zrekod`,
+         woj = NTS3,
+         podregion = NTS4,
+         #umowa_rodzaj = RODZAJ_UMOWY,
+         sekcja_pkd = `kodPKD`,
+         branza = Q4a,
+         czy_pracodawca = Q3A,
+         czy_ogloszeniodawca = Q3c,
+         #jezyk = JEZYKI_OBCE,
+         jezyk_angielski = `Angielski`,
+         jezyk_niemiecki = `Niemiecki`,
+         staz = `Doświadczenie_all_0_1`,
+         komp_zawodowe = `KOM_ZAW_0_1`,
+         komp_techniczne = `KOM_TECH_0_1`,
+         komp_matematyczne = `KOM_MAT_0_1`,
+         komp_kulturalne = `KOM_ART_0_1`,
+         komp_komputerowe = `KOM_KOM_0_1`,
+         komp_kognitywne = `KOM_KOG_0_1`,
+         komp_kierownicze = `KOM_KIER_0_1`,
+         komp_interpersonalne = `KOM_INT_0_1`,
+         komp_indywidualne = `KOM_SAM_0_1`,
+         komp_fizyczne = `KOM_FIZ_0_1`,
+         komp_dyspozycyjne = `KOM_DYS_0_1`,
+         komp_biurowe = `KOM_BIUR_0_1`) %>%
+  select(zrodlo, forma_ogl, zrodlo_dokladne, zawod, zawod_9grup, wyksztalcenie, woj, podregion,  sekcja_pkd, branza, 
+         czy_pracodawca, czy_ogloszeniodawca, jezyk_angielski, jezyk_niemiecki, staz, komp_zawodowe, 
+         komp_techniczne, komp_matematyczne, komp_kulturalne, komp_komputerowe, komp_kognitywne, 
+         komp_kierownicze, komp_interpersonalne, komp_indywidualne, komp_fizyczne, komp_dyspozycyjne, komp_biurowe)%>%
+  mutate(rok = 2013,
+         wyksztalcenie = case_when(wyksztalcenie == 1 ~ 'podstawowe lub brak',
+                                    wyksztalcenie == 2 ~ 'zasadnicze',
+                                    wyksztalcenie %in% 3:4 ~ 'srednie',
+                                    wyksztalcenie %in% 5:6 ~ 'lic/inz',
+                                    wyksztalcenie %in% 7  ~ 'wyzsze')) 
+dane2013 
+```
+
+
+
+## Dane za 2014
+
+```{r}
+dane2014 <- read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_5ed.sav') %>%
+  select(-woj) %>% 
+  rename(plik = N1,
+         #zrodlo = zrodlo_oferty,
+         forma_ogl = Q2a,
+         zrodlo_dokladne = Q2b,
+         zawod = Q5_ISCO,
+         #zawod_9grup = ISCO_grupy_wielkie,
+         #zawod_40grup = Q5_KOD_ISCO40,
+         #zatrudnienie_typ  = ZATRUDNIENIE_TYP,
+         #zasoby = ZASOBY,
+         wyksztalcenie = `wyksztalcenie_poziom`,
+         woj = NTS3,
+         nr_ref = NR_REF,
+         podregion = NTS4,
+         #umowa_rodzaj = RODZAJ_UMOWY,
+         sekcja_pkd = `kodPKD`,
+         branza = Q4a,
+         czy_pracodawca = Q3A,
+         czy_ogloszeniodawca = Q3c,
+         #jezyk = JEZYKI_OBCE,
+         #jezyk_angielski = `Angielski`,
+         #jezyk_niemiecki = `Niemiecki`,
+         staz = `staz`,
+         # komp_zawodowe = `KOM_ZAW_0_1`,
+         # komp_techniczne = `KOM_TECH_0_1`,
+         # komp_matematyczne = `KOM_MAT_0_1`,
+         # komp_kulturalne = `KOM_ART_0_1`,
+         # komp_komputerowe = `KOM_KOM_0_1`,
+         # komp_kognitywne = `KOM_KOG_0_1`,
+         # komp_kierownicze = `KOM_KIER_0_1`,
+         # komp_interpersonalne = `KOM_INT_0_1`,
+         # komp_indywidualne = `KOM_SAM_0_1`,
+         # komp_fizyczne = `KOM_FIZ_0_1`,
+         # komp_dyspozycyjne = `KOM_DYS_0_1`,
+         # komp_biurowe = `KOM_BIUR_0_1`
+         ) %>%
+  mutate(jezyk_angielski = rowSums(select(.,starts_with('JEZYKI_OBCE'))  == 25, na.rm = T) > 0, 
+         jezyk_niemiecki = rowSums(select(.,starts_with('JEZYKI_OBCE'))  == 14, na.rm = T) > 0, 
+         komp_zawodowe = rowSums(select(.,matches('KOMPETENCJA[A-Z]$'))  == 120, na.rm = T) > 0,
+         komp_techniczne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in% 90:99)), na.rm = T) > 0,
+         komp_matematyczne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in%  110:119)), na.rm = T) > 0,
+         komp_kulturalne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$'))  %>% mutate_all(funs(. %in% 30:39)), na.rm = T) > 0,
+         komp_komputerowe = rowSums(select(.,matches('KOMPETENCJA[A-Z]$'))  %>% mutate_all(funs(. %in% 100:109)), na.rm = T) > 0,
+         komp_kognitywne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in% 10:19)), na.rm = T) > 0,
+         komp_kierownicze = rowSums(select(.,matches('KOMPETENCJA[A-Z]$'))  %>% mutate_all(funs(. %in% 60:69)), na.rm = T) > 0,
+         komp_interpersonalne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in%  50:59)), na.rm = T) > 0,
+         komp_indywidualne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in% 20:29)), na.rm = T) > 0,
+         komp_fizyczne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in% 40:49)), na.rm = T) > 0,
+         komp_dyspozycyjne = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in% 70:79)), na.rm = T) > 0,
+         komp_biurowe = rowSums(select(.,matches('KOMPETENCJA[A-Z]$')) %>% mutate_all(funs(. %in% 80:89)), na.rm = T) > 0) %>%
+  select(plik, forma_ogl, zrodlo_dokladne, zawod, wyksztalcenie, woj, nr_ref, podregion, 
+         sekcja_pkd, branza, czy_pracodawca, czy_ogloszeniodawca, staz, jezyk_angielski:komp_biurowe) %>%
+  mutate(rok = 2014,
+         zrodlo = ifelse(forma_ogl == 1, 1, 2),
+         wyksztalcenie = case_when(wyksztalcenie %in% 1:2 ~ 'podstawowe lub brak',
+                                    wyksztalcenie == 3 ~ 'zasadnicze',
+                                    wyksztalcenie %in% 5:7 ~ 'srednie',
+                                    wyksztalcenie %in% 8:9 ~ 'lic/inz',
+                                    wyksztalcenie %in% 10:11  ~ 'wyzsze')) 
+
+dane2014 %>%
+  filter(forma_ogl == 2) %>%
+  mutate(zrodlo_dokladne = as_factor(zrodlo_dokladne),
+         sekcja_pkd = as_factor(sekcja_pkd)) %>%
+  filter(nr_ref == 'StPr/14/0169') %>%
+  select(zawod, nr_ref, sekcja_pkd)
+
+dane2014
+
+```
+
+
+# Sprawdzamy równość atrybutów
+
+```{r}
+all.equal(attr(dane2010$sekcja_pkd,'labels'),
+          attr(dane2011$sekcja_pkd,'labels'),
+          attr(dane2012$sekcja_pkd,'labels'),
+          attr(dane2013$sekcja_pkd,'labels'),
+          attr(dane2014$sekcja_pkd,'labels'))
+```
+
+```{r}
+list(attr(dane2010$branza,'labels'),
+          attr(dane2011$branza,'labels'),
+          attr(dane2012$branza,'labels'),
+          attr(dane2013$branza,'labels'),
+          attr(dane2014$branza,'labels')) %>% sapply(., length)
+```
+
+```{r}
+all.equal(attr(dane2010$branza,'labels'),
+          attr(dane2011$branza,'labels'),
+          attr(dane2012$branza,'labels'),
+          attr(dane2013$branza,'labels'),
+          attr(dane2014$branza,'labels'))
+```
+
+
+# Łączymy
+
+zawod = -1 / nie dotyczy (czyli oferty, które nie dotyczą badanej populacji)
+
+PKD bez etykiet i zle zapisane c(4, 400, 40, 998, 158, 328, 443, 404, 434, 444, 484)
+
+```{r}
+bkl_oferty <- bind_rows(
+  dane2010 %>%
+    mutate(jezyk_angielski = as.numeric(jezyk_angielski),
+           jezyk_niemiecki = as.numeric(jezyk_niemiecki)) %>%
+    mutate_at(vars(komp_zawodowe:komp_biurowe),
+              funs(ifelse(.>0,1,0))), #%>%
+    #filter(zawod != -1),
+  dane2011, #%>%
+    #filter(zawod != -1),
+  dane2012 %>% mutate_at(vars(jezyk_angielski,jezyk_niemiecki),
+                         funs(ifelse(.>0,1,0))),
+  dane2013, #%>% 
+    #filter(zawod != -1),
+  dane2014 %>%
+    mutate_at(vars(jezyk_angielski:komp_biurowe), as.numeric) #%>%
+    #filter(zawod != -1)
+) %>%
+  mutate(sekcja_pkd = ifelse(sekcja_pkd == 1919, 960,sekcja_pkd),
+         sekcja_pkd = ifelse(sekcja_pkd %in% c(4, 400, 40, 998, 158, 328, 443, 404, 434, 444, 484), NA, sekcja_pkd),
+         zawod = stringi::stri_pad_right(zawod,6,0),
+         sekcja_pkd2 = stringi::stri_pad_left(sekcja_pkd,3,0)) %>%
+  mutate_all(funs(ifelse(.<0,NA,.)))
+
+bkl_oferty %>%
+  count(sekcja_pkd,sekcja_pkd2)
+
+dane2014 %>%
+  count(sekcja_pkd, sekcja_pkd_lab = as_factor(sekcja_pkd)) %>%
+  View()
+```
+
+```{r}
+## kopiujemy atrybuty
+attributes(bkl_oferty$zrodlo_dokladne) <- attributes(dane2014$zrodlo_dokladne)
+attributes(bkl_oferty$woj) <- attributes(dane2014$woj)
+attributes(bkl_oferty$podregion) <- attributes(dane2014$podregion)
+attributes(bkl_oferty$forma_ogl) <- attributes(dane2014$forma_ogl)
+attributes(bkl_oferty$staz) <- attributes(dane2014$staz)
+attributes(bkl_oferty$czy_pracodawca) <- attributes(dane2014$czy_pracodawca)
+attributes(bkl_oferty$czy_ogloszeniodawca) <- attributes(dane2014$czy_ogloszeniodawca)
+attributes(bkl_oferty$branza) <- attributes(dane2014$branza)
+attributes(bkl_oferty$sekcja_pkd) <- attributes(dane2014$sekcja_pkd)
+attributes(bkl_oferty$zawod) <- attributes(dane2014$zawod)
+
+attr(bkl_oferty$sekcja_pkd,'labels') <- stringi::stri_pad_right(attr(dane2014$sekcja_pkd,'labels'), 3, 0)
+attr(attr(bkl_oferty$sekcja_pkd,'labels'),'names') <- attr(attr(dane2014$sekcja_pkd,'labels'),'names')
+
+attr(bkl_oferty$zawod,'labels') <- stringi::stri_pad_right(attr(bkl_oferty$zawod,'labels'), 6, 0)
+attr(attr(bkl_oferty$zawod,'labels'),'names') <- attr(attr(dane2014$zawod,'labels'),'names')
+```
+
+```{r}
+saveRDS(object = bkl_oferty, file = 'data/bkl-oferty.rds')
+```
+
+# Statystyki przed imputacją
+
+```{r}
+skimr::skim(bkl_oferty)
+```
+
+
+
+
+
+Export tekstu do modelowania
+
+
+
+```{r}
+dane2014 <- read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_5ed.sav')
+head(dane2014)
+
+## doswiadczenie
+doswiadczenie <- dane2014 %>% select(Q6a1:Q6z1, Q6a3:Q6z3) %>%
+  gather(dosw, tekst, Q6a1:Q6z1) %>%
+  gather(dosw_kod, kod, Q6a3:Q6z3) %>%
+  mutate(dosw = substr(dosw,1,3),
+         dosw_kod = substr(dosw_kod,1,3)) %>%
+  filter(dosw == dosw_kod) %>%
+  filter(!is.na(kod)) %>%
+  count(tekst, kod)
+
+head(doswiadczenie)
+
+
+kompetencje <- dane2014 %>% select(KOMPETENCJA_ORYGINALNAA:KOMPETENCJA_ORYGINALNAAG,
+                                   KOMPETENCJAA:KOMPETENCJAAG) %>%
+  gather(komp, tekst, KOMPETENCJA_ORYGINALNAA:KOMPETENCJA_ORYGINALNAAG) %>%
+  gather(komo_kod, kod, KOMPETENCJAA:KOMPETENCJAAG) %>%
+  filter(stringi::stri_extract(str = komp, regex = '[A-Z]{1}$') == stringi::stri_extract(komo_kod,regex='[A-Z]{1}$')) %>%
+  filter(!is.na(kod)) %>%
+  count(tekst, kod) %>% 
+  filter(stringi::stri_length(tekst) > 0)
+
+head(kompetencje)
+
+kompetencje %>%
+  count(kod = substr(kod,1,1), wt = n)
+
+save(kompetencje, doswiadczenie, file = 'data/bkl-2014-komp-dosw.rds')
+```
+

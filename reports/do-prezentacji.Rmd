@@ -1,0 +1,620 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r}
+library(vcd)
+library(scales)
+library(xtable)
+library(VIM)
+library(readxl)
+```
+
+Dane źródłowe
+
+```{r}
+files <- list.files(path = '~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/',
+                    pattern = '*.sav$',
+                    full.names = T)
+files
+
+lapply(files, function(x) dim(haven::read_spss(x)))
+```
+
+
+```{r}
+load("~/Documents/Uczelnia/Papers/In_preparation/Oferty pracy/data/bkl_oferty_to_analysis.rda")
+bkl_oferty_to_analysis
+```
+
+```{r}
+korelacje <- bkl_oferty_to_analysis %>% 
+  select(forma_ogl:komp_biur,podregion,woj=woj2,jezyk_angielski,zawod = kod_zawodu_grupa_2)
+
+empty_m <- matrix(ncol = length(korelacje),
+                  nrow = length(korelacje),
+                  dimnames = list(names(korelacje), 
+                                  names(korelacje)))
+
+calculate_cramer <- function(m, df) {
+ for (r in seq(nrow(m))){
+   for (c in seq(ncol(m))){
+     m[[r, c]] <- assocstats(table(df[[r]], df[[c]]))$cramer
+   }
+ }
+    return(m)
+}
+cor_matrix <- calculate_cramer(empty_m ,korelacje)
+
+Cairo::CairoPNG(filename = '../plots/zmienne-korelacje.png',
+                width = 640*1.3, height = 480*1.3)
+heatmap(cor_matrix)
+dev.off()
+
+```
+
+```{r}
+
+
+bkl_oferty_to_analysis %>%
+  select(forma_ogl, starts_with('komp'),-komp_liczba,-komp_wymagane) %>%
+  gather(komp, val, -forma_ogl) %>%
+  count(forma_ogl = factor(forma_ogl, levels = c(0,1), labels = c('PUP', 'Internet')),
+        komp = factor(komp, 
+                      levels = c("komp_zaw", "komp_tech", "komp_mat", "komp_kult", "komp_komp",  
+                                 "komp_kog", "komp_kier", "komp_inter", "komp_ind", "komp_fiz",  
+                                 "komp_dyspo", "komp_biur"),
+                      labels = c("Zawodowe","Techniczne","Matematyczne","Kulturowe","Komputerowe",
+                                 "Kongitywistyczne","Kierownicze","Interpersonalne","Indywidualne",
+                                 "Fizyczne","Dyspozycyjne","Biurowe")),
+        val = factor(val, levels = c(0,1), labels = c('Nie', 'Tak'))) %>%
+  group_by(forma_ogl,komp) %>%
+  mutate(p = n / sum(n)) %>%
+  ggplot(data = .,
+         aes(x = forma_ogl,
+             y = p,
+             fill = val)) +
+  geom_col(col = 'black') +
+  facet_wrap(~komp) +
+  theme_bw() +
+  scale_y_continuous(labels  = scales::percent) +
+  labs(x = 'Źródło', y = 'Frakcja') + 
+  scale_fill_brewer(name = 'Czy wystąpiła?',
+                    palette = 'Set1') -> p
+
+p
+ggsave(filename = 'plots/kompetencje-bar.png',
+       plot = p)
+
+
+```
+
+Zawody
+
+```{r}
+bkl_oferty_to_analysis %>% 
+  select(forma_ogl:komp_biur, zawod = kod_zawodu_grupa_2) %>%
+  gather(komp, vals, -forma_ogl, -zawod) %>%
+  count(forma_ogl,zawod,komp,vals) %>% 
+  filter(vals == 1) %>%
+  xtabs(n ~ zawod + komp + forma_ogl, data = .) %>%
+  mjca() %>%
+  plot()
+  
+```
+
+
+Korelacje mięzy zmiennymi
+
+```{r}
+
+```
+
+Model mieszany 
+
+```{r}
+model1 <- glmer(forma_ogl ~ komp_zaw + komp_tech + komp_mat + komp_kult + komp_komp + 
+                  komp_kog + komp_kier + komp_inter + komp_ind + komp_fiz + komp_dyspo + komp_biur + 
+                  jezyk_angielski + factor(kod_zawodu_grupa_2) + (1 | podregion),
+                data = bkl_oferty_to_analysis, 
+                family = binomial,
+                nAGQ = 1,
+                glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE, sparseX = T))
+summary(model1)
+```
+
+```{r}
+car::Anova(model1)
+```
+
+## Porównanie z GUS
+
+  1 'PRZEDSTAWICIELE W£ADZ PUBLICZNYCH, WY¯SI URZÊDNICY I KIEROWN'
+  2 'SPECJALIŒCI'
+  3 'TECHNICY I INNY ŒREDNI PERSONEL'
+  4 'PRACOWNICY BIUROWI'
+  5 'PRACOWNICY US£UG I SPRZEDAWCY'
+  6 'ROLNICY, OGRODNICY, LEŒNICY I RYBACY'
+  7 'ROBOTNICY PRZEMYS£OWI I RZEMIEŒLNICY'
+  8 'OPERATORZY I MONTERZY MASZYN I URZ¥DZEÑ'
+  9 'PRACOWNICY PRZY PRACACH PROSTYCH'
+  
+```{r}
+pos <- read_excel('../data-raw/gus-pos.xlsx') %>%
+  select(year = Rok,
+         pos = Zawód,
+         quarter = Kwartał,
+         new = `Wolne nowo utworzone miejsca pracy`,
+         free = `Wolne miejsca pracy`) %>%
+  mutate(quarter = as.numeric(as.roman(quarter)),
+         yq = as.yearqtr(paste(year,quarter),format='%Y %q')) %>%
+  select(-year,-quarter) %>%
+  mutate(new=as.numeric(new),
+         free=as.numeric(free),
+         pos = gsub('osobistych ','',pos),
+         pos = gsub('\\s{2,} ',' ',pos),
+         pos = stri_trim_both(pos), 
+         pos_kod = case_when(pos == 'Operatorzy i monterzy maszyn i urządzeń' ~ 8,
+                             pos == 'Pracownicy biurowi' ~ 4,
+                             pos == 'Pracownicy przy pracach prostych' ~ 9,
+                             pos == 'Pracownicy usług i sprzedawcy' ~ 5,
+                             pos == 'Przedstawiciele władz publicznych, wyżsi urzędnicy i kierownicy' ~ 1,
+                             pos == 'Robotnicy przemysłowi i rzemieślnicy'  ~ 7,
+                             pos == 'Specjaliści' ~ 2, 
+                             pos == 'Technicy i inny średni personel' ~ 3))
+pos
+```
+
+```{r}
+pos %>%
+  count(pos_kod, pos) %>%
+  select(-n) %>%
+  xtable(digits = 0) %>%
+  print(include.rownames = F)
+  
+  
+```
+
+```{r}
+dane_porownanie <- pos %>%
+  filter(as.character(yq) %in% c('2010 Q3','2011 Q1','2012 Q1','2013 Q1','2014 Q1')) %>%
+  group_by(yq) %>%
+  mutate(p = free / sum(free)) %>%
+  select(kod = pos_kod, zawod = pos, p) %>%
+  arrange(yq,kod) %>%
+  ungroup() %>% 
+  mutate(zrodlo = 2,
+         yq = lubridate::year(yq)) %>%
+  bind_rows(
+    bkl_oferty_to_analysis %>%
+      count(yq=dane_rok, zrodlo=forma_ogl,kod = kod_zawodu_grupa_2) %>%
+      group_by(yq,zrodlo) %>%
+      mutate(p = n/sum(n)) %>%
+      select(-n) %>%
+      ungroup()
+  )  %>%
+  bind_rows( 
+    bkl_oferty_to_analysis %>%
+      count(yq=dane_rok, kod = kod_zawodu_grupa_2) %>%
+      group_by(yq) %>%
+      mutate(p = n/sum(n),
+             zrodlo = -1) %>%
+      select(-n) %>%
+      ungroup()
+  ) %>%
+  arrange(yq,kod,zrodlo) %>%
+  fill(zawod,.direction = 'up') %>%
+  mutate(zrodlo = factor(x = zrodlo,
+                         levels = c(-1,0,1,2),
+                         labels = c('Int+PUP', 'PUP', 'Int','GUS')),
+         zawod = gsub('\\, ','\\,\\\n ', zawod)) 
+dane_porownanie
+```
+
+```{r}
+dane_porownanie %>%
+  ggplot(data = ., aes(x = factor(zrodlo),
+                       y = p,
+                       fill = zawod)) +
+  geom_col(col = 'black') +
+  facet_wrap(~yq, nrow = 1) +
+  scale_fill_brewer(name = 'Zawód', palette = 'Spectral')  + 
+  scale_y_continuous(labels = percent) +
+  labs(x = 'Źródło', y = 'Udział') + 
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(vjust = 1, hjust=1, angle = 45)) -> 
+  p
+p
+ggsave(plot = p, file = '../seminar-pres/graphs/zawod-udzial-zrodla.png', width = 12)
+```
+
+
+Obciązenie
+
+```{r}
+dane_porownanie %>%
+  spread(zrodlo, p)  %>%
+  select(`Int+PUP`:GUS) %>%
+  GGally::ggpairs() -> p
+
+ggsave(filename = '../seminar-pres/graphs/correlation.png', plot = p)
+```
+
+```{r}
+dane_porownanie %>%
+  spread(zrodlo, p) %>%
+  gather(zrodlo, p, `Int+PUP`, PUP, Int) %>%
+  mutate(bias = abs(p - GUS)/GUS) %>%
+  ggplot(data = .,
+         aes(x = reorder(zrodlo,-bias),
+             y = bias)) +
+  geom_boxplot() +
+  labs(y = 'Absolutne obciążenie [w p.p.]',
+       x = 'Źródło')  -> p
+
+p + facet_wrap(~yq) + scale_y_sqrt()
+
+ggsave(filename = '../seminar-pres/graphs/boxplot-zrodla.png')
+```
+
+```{r}
+dane_porownanie %>%
+  spread(zrodlo, p) %>%
+  gather(zrodlo, p, `Int+PUP`, PUP, Int) %>%
+  mutate(bias = abs(p - GUS)*100) %>%
+  group_by(zrodlo) %>%
+  do(sum = tidy(summary(.$bias))) %>%
+  unnest(sum) %>%
+  rename(`Źródło` = zrodlo,
+         Min = minimum,
+         Q1 = q1,
+         Mediana = median,
+         `Średnia` = mean,
+         Q3 = q3,
+         Max = maximum) %>%
+  xtable(caption = c('Absolutne obciążenie według źródła')) %>%
+  print.xtable(include.rownames = F,
+               caption.placement = 'top',
+               comment = FALSE)
+```
+
+```{r}
+dane_porownanie %>%
+  spread(zrodlo, p) %>%
+  gather(zrodlo, p, `Int+PUP`, PUP, Int) %>%
+  mutate(bias = (p - GUS)/GUS*100) %>%
+  group_by(zrodlo) %>%
+  do(sum = tidy(summary(.$bias))) %>%
+  unnest(sum) %>%
+  rename(`Źródło` = zrodlo,
+         Min = minimum,
+         Q1 = q1,
+         Mediana = median,
+         `Średnia` = mean,
+         Q3 = q3,
+         Max = maximum) %>%
+  xtable(caption = c('Absolutne obciążenie według źródła')) %>%
+  print.xtable(include.rownames = F,
+               caption.placement = 'top',
+               comment = FALSE)
+```
+
+```{r}
+dane_porownanie %>%
+  spread(zrodlo, p) %>%
+  gather(zrodlo, p, `Int+PUP`, PUP, Int) %>%
+  mutate(bias = abs(p - GUS)*100) %>%
+  ggplot(data = .,
+         aes(x = reorder(zawod, -bias),
+             y = bias,
+             fill = zrodlo)) +
+  geom_boxplot(position=position_dodge(width = 0.8, preserve = 'single')) +
+  theme(axis.text.x = element_text(vjust = 1, hjust=1, angle = 45))  +
+  scale_fill_brewer(name = 'Źródło',
+                    palette = 'Set1') + 
+  labs(y = 'Absolutne obciążenie [w p.p.]',
+       x = 'Zawód')  -> p
+
+p
+ggsave(filename = '../seminar-pres/graphs/boxplot-zawod.png', width = 10)
+
+```
+
+
+```{r}
+dane_porownanie %>%
+  spread(zrodlo, p) %>%
+  gather(zrodlo, p, `Int+PUP`, PUP, Int) %>%
+  mutate(bias = abs(p - GUS)*100) %>%
+  ggplot(data = .,
+         aes(x = yq,
+             y = bias)) +
+  geom_point() + 
+  geom_smooth(aes(group = zrodlo,
+                  color = zrodlo),
+              se = FALSE,
+              method = 'loess')  +
+  labs(y = 'Absolutne obciążenie [w p.p.]',
+       x = 'Rok (I kwartał)')  +
+  scale_color_brewer(name = 'Źródło', palette = 'Set1') -> p
+
+p
+ggsave(filename = '../seminar-pres/graphs/bias-trend.png')
+
+```
+
+
+```{r}
+bkl_oferty_to_analysis %>%
+  select(forma_ogl, komp_zaw:komp_biur, kod_zawodu_grupa_2) %>%
+  gather(nazwy_komp, wartosci,-forma_ogl,-kod_zawodu_grupa_2) %>%
+  count(forma_ogl=factor(forma_ogl), kod_zawodu_grupa_2, nazwy_komp, wartosci) %>%
+  filter(wartosci == 1, nazwy_komp !='komp_mat') %>%
+  mutate(nazwy_komp = gsub('komp_','',nazwy_komp),
+         forma_ogl = ifelse(forma_ogl == 1, 'Int','PUP')) %>%
+  group_by(forma_ogl, kod_zawodu_grupa_2) %>%
+  mutate(p = n / sum(n)) %>%
+  ggplot(data = .) +
+    geom_col(mapping = aes(x = forma_ogl, y = p, fill = nazwy_komp),color = 'black') +
+    facet_wrap( ~ kod_zawodu_grupa_2, 
+                nrow = 2,
+                labeller = labeller(kod_zawodu_grupa_2 = c('1' = 'Przedstawiciele władz publicznych...',
+                                                           '2' = 'Specjaliści',
+                                                           '3' = 'Technicy i inny średni personel',
+                                                           '4' = 'Pracownicy biurowi',
+                                                           '5' = 'Pracownicy usług i sprzedawcy',
+                                                           '7' = 'Robotnicy przemysłowi i rzemieślnicy',
+                                                           '8' = 'Operatorzy i monterzy maszyn i urządzeń',
+                                                           '9' = 'Pracownicy przy pracach prostych'))) +
+    xlab("Forma ogłoszenia") + ylab("Udział")  +
+  scale_fill_brewer(name = 'Kompetencje',
+                    palette = 'Spectral') -> kompetencje
+
+ggsave(filename = '../seminar-pres/graphs/kompetencje.png',
+       plot = kompetencje, width = 12)
+```
+
+
+Dane dla jednego roku (2014)
+```{r}
+dane2013 <- readRDS('../data/dane13.rds')
+```
+
+```{r}
+dane2013 %>%
+  count(kod_pkd=substr(kod_pkd,1,1),forma_ogl, sort= T) %>%
+  spread(forma_ogl, n) %>%
+  mutate(p3 = `3`/sum(`3`),
+         p1 = `1`/sum(`1`))
+```
+
+```{r}
+dane2013 %>%
+  count(kod_pkd = substr(kod_pkd,1,1),
+        kod_zawodu = substr(kod_zawodu,1,1),
+        forma_ogl, sort= T) %>%
+  filter(forma_ogl == 3, kod_zawodu != 6) %>%
+  spread(kod_zawodu, n) %>%
+  na.omit() %>%
+  select(-forma_ogl) %>%
+  gather(zawod, n, -kod_pkd) %>%
+  xtabs(n~kod_pkd+zawod, data =.) %>%
+  assocstats()
+  
+```
+
+```{r}
+dane2013 %>%
+  count(kod_pkd = substr(kod_pkd,1,1),
+        kod_zawodu = substr(kod_zawodu,1,1),
+        forma_ogl, sort= T) %>%
+  filter(forma_ogl == 3, kod_zawodu != 6) %>%
+  spread(kod_zawodu, n) %>%
+  na.omit() %>%
+  select(-forma_ogl) %>%
+  gather(zawod, n, -kod_pkd) %>%
+  xtabs(n~kod_pkd+zawod, data =.) %>%
+  ca() %>%
+  plot()
+```
+
+
+Liczebności w 2013 roku
+
+```{r}
+
+```
+
+
+
+#### dla 2014 roku
+
+```{r}
+dane2014 <- haven::read_spss('~/Documents/Uczelnia/Zbiory/BKL/bazy_oferty_pracy/BKL_oferty_pracy_5ed.sav')
+str(dane2014,1)
+
+dane2014 %>%
+  count(zrodlo = ifelse(Q2a==1,'Internet','PUP'), kodPKD = as.numeric(substr(kodPKD,1,1)), sort = T)  %>%
+  spread(zrodlo, n) %>%
+  mutate(Internet = Internet/sum(Internet)*100,
+         PUP = PUP/sum(PUP)*100) %>%
+  xtable()
+```
+
+
+```{r}
+dane2014  %>%
+  count(kodPKD = ifelse(kodPKD<100,kodPKD*10,kodPKD)) %>%
+  count(kodPKD = substr(kodPKD,1,2), wt = n) %>%
+  mutate(sekcja = case_when(kodPKD %in% 10:39 ~ 'A',
+                            kodPKD %in% 40:))
+```
+
+```{r}
+ as.data.frame(attr(dane2014$kodPKD,'labels')) %>% View()
+```
+
+
+Braki danych
+
+```{r}
+dane2014 %>%
+  select(woj=NTS3,podreg = NTS4, zrodlo=Q2a,pkd = kodPKD, 
+         zawod = Q5_ISCO, miejsc = Q2c, pracodaw = Q3A) %>%
+  mutate_all(funs(ifelse(.<0,NA,.))) %>%
+  mutate(miejsc = ifelse(miejsc==2,NA,miejsc),
+         pracodaw = ifelse(pracodaw == 2,NA,pracodaw))  -> dane_imp 
+
+Cairo::CairoPNG('../seminar-pres/graphs/missings.png',width = 480*2, pointsize = 20)
+aggr(dane_imp, sortVars = T)
+dev.off()
+```
+
+```{r}
+dane_imp %>%
+  count(pkd = is.na(pkd), zrodlo=ifelse(zrodlo==1,'Internet','PUP')) %>%
+  xtabs(n~pkd + zrodlo, data = .) %>%
+  prop.table(margin = 2)
+```
+
+```{r}
+pkd <- read_excel('../data-raw/pkd2007.xls', sheet = 3) %>%
+  select(symbol, nazwa)
+```
+
+```{r}
+dane2014 %>%
+  mutate(pkd_label = as_factor(kodPKD)) %>%
+  left_join(
+    pkd %>%
+      mutate(nazwa = tolower(nazwa),
+             sekcja = ifelse(grepl('^[A-Z]$',symbol),symbol,NA)) %>%
+      fill(sekcja),
+    by = c('pkd_label'='nazwa')
+  ) %>%
+  select(woj=NTS3,podreg = NTS4, zrodlo=Q2a,pkd = kodPKD, 
+         zawod = Q5_ISCO, miejsc = Q2c, pracodaw = Q3A, sekcja) %>%
+  mutate(zaw = substr(zawod,1,1),
+         zaw = ifelse(zaw == '-',NA,zaw),
+         zaw = as.numeric(zaw),
+         zrodlo = ifelse(zrodlo == 1, 'Int-2', 'PUP-2')) %>%
+  filter(sekcja %in% c("C", "F", "G", "H", "J",  "K", "M", "N", "O", "P", "Q", "R", "S")) %>%
+  ungroup() %>%
+  count(zrodlo,zaw) %>%
+  na.omit() %>%
+  filter(zaw !=6) %>%
+  group_by(zrodlo) %>%
+  mutate(p = n / sum(n),
+         yq = 2014) %>%
+  select(kod = zaw, -n,p,yq)  -> nowe_por
+nowe_por
+```
+
+```{r}
+dane_porownanie %>%
+  bind_rows(nowe_por) %>%
+  filter(yq == 2014) %>%
+  arrange(kod,zrodlo) %>%
+  fill(zawod) %>%
+  ggplot(data = ., aes(x = factor(zrodlo),
+                       y = p,
+                       fill = zawod)) +
+  geom_col(col = 'black') +
+  facet_wrap(~yq, nrow = 1) +
+  scale_fill_brewer(name = 'Zawód', palette = 'Spectral')  + 
+  scale_y_continuous(labels = percent) +
+  labs(x = 'Źródło', y = 'Udział') + 
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(vjust = 1, hjust=1, angle = 45))
+```
+
+Przewazenie po PKD
+
+```{r}
+totals <- data.frame(
+  sekcja = c('O','N','F','K','M','R','P','G','J','Q','S','C','H','D'),
+  N = c(7.0,14.0,65.6,13.1,44.5,9.2,50.5,203.8,12.7,24.1,14.6,78.9,32.5,28.0))
+
+dane2014 %>%
+  mutate(pkd_label = as_factor(kodPKD)) %>%
+  left_join(
+    pkd %>%
+      mutate(nazwa = tolower(nazwa),
+             sekcja = ifelse(grepl('^[A-Z]$',symbol),symbol,NA)) %>%
+      fill(sekcja),
+    by = c('pkd_label'='nazwa')
+  ) %>%
+  select(woj=NTS3,podreg = NTS4, zrodlo=Q2a,pkd = kodPKD, 
+         zawod = Q5_ISCO, miejsc = Q2c, pracodaw = Q3A, sekcja) %>%
+  mutate(zaw = substr(zawod,1,1),
+         zaw = ifelse(zaw == '-',NA,zaw),
+         zaw = as.numeric(zaw),
+         zrodlo = ifelse(zrodlo == 1, 'Int-2', 'PUP-2')) %>%
+  filter(sekcja %in% c("C", "F", "G", "H", "J", "K", "M", "N", "O", "P", "Q", "R", "S")) %>%
+  left_join(totals) %>%
+  group_by(sekcja) %>%
+  mutate(n = n(),
+         N = N*1000,
+         waga = N/n) %>%
+  ungroup() %>%
+  count(zrodlo,zaw, wt = waga) %>%
+  na.omit() %>%
+  filter(zaw != 6) %>%
+  group_by(zrodlo) %>%
+  mutate(p = nn / sum(nn),
+         yq = 2014) %>%
+  select(kod = zaw, -nn,p,yq)  -> por_dwa
+  
+```
+
+```{r}
+dane_porownanie %>%
+  bind_rows(por_dwa) %>%
+  filter(yq == 2014) %>%
+  arrange(kod,zrodlo) %>%
+  fill(zawod) %>%
+  ggplot(data = ., aes(x = factor(zrodlo),
+                       y = p,
+                       fill = zawod)) +
+  geom_col(col = 'black') +
+  facet_wrap(~yq, nrow = 1) +
+  scale_fill_brewer(name = 'Zawód', palette = 'Spectral')  + 
+  scale_y_continuous(labels = percent) +
+  labs(x = 'Źródło', y = 'Udział') + 
+  theme(text = element_text(size = 15),
+        axis.text.x = element_text(vjust = 1, hjust=1, angle = 45))
+```
+
+```{r}
+nowe_por %>%
+  left_join(por_dwa %>% rename(p2=p)) %>%
+  ggplot(data = .,
+         aes(x = p,
+             y = p2 )) +
+  geom_point() +
+  geom_abline(a=0,b=1)
+```
+
+```{r}
+dane_porownanie %>%
+  bind_rows(por_dwa) %>%
+  bind_rows(nowe_por %>%
+              ungroup() %>%
+              mutate(zrodlo = ifelse(zrodlo == 'Int-2','Int-bez','PUP-bez'))) %>%
+  filter(yq == 2014) %>%
+  arrange(kod,zrodlo) %>%
+  fill(zawod) %>%
+  spread(zrodlo,p) %>%
+  mutate_at(vars(Int:`PUP-bez`),
+            funs(abs(.-GUS)/GUS*100)) %>%
+  gather(zrodlo,p, Int:`PUP-bez`) %>%
+  ggplot(data =.,
+         aes(x = zrodlo,
+             y = p)) +
+  geom_boxplot()
+```
+

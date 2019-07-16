@@ -1,0 +1,131 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(plotly)
+library(readxl)
+library(zoo)
+library(stringi)
+theme_set(theme_bw())
+```
+
+# Read GUS data
+
+```{r}
+woj <- read_excel('../data-raw/gus-woj.xlsx') %>%
+  select(year = rok,
+         woj = Wojewodztwo,
+         quarter = kwartal,
+         new = `Nowo utworzone miejsca pracy`,
+         free = `Wolne miejsca  pracy`) %>%
+  mutate(quarter = as.numeric(as.roman(quarter)),
+         yq = as.yearqtr(paste(year,quarter),format='%Y %q')) %>%
+  select(-year,-quarter)
+woj
+woj %>%
+  gather(job,count,new,free) %>%
+  mutate(count = as.numeric(count)) %>%
+  ggplot(data= .,
+         aes(x = yq,
+             y = count,
+             group = job,
+             color = job)) +
+  geom_line() +
+  facet_wrap(~woj) +
+  scale_y_log10() +
+  scale_x_yearqtr()
+```
+
+
+```{r}
+pos <- read_excel('../data-raw/gus-pos.xlsx') %>%
+  select(year = Rok,
+         pos = Zawód,
+         quarter = Kwartał,
+         new = `Wolne nowo utworzone miejsca pracy`,
+         free = `Wolne miejsca pracy`) %>%
+  mutate(quarter = as.numeric(as.roman(quarter)),
+         yq = as.yearqtr(paste(year,quarter),format='%Y %q')) %>%
+  select(-year,-quarter) %>%
+  mutate(new=as.numeric(new),
+         free=as.numeric(free),
+         pos = gsub('osobistych ','',pos),
+         pos = gsub('\\s{2,} ',' ',pos),
+         pos = stri_trim_both(pos)) 
+
+pos %>%
+  gather(job,count,new,free) %>%
+  ggplot(data= .,
+         aes(x = yq,
+             y = count,
+             group = job,
+             color = job)) +
+  geom_line() +
+  facet_wrap(~pos) +
+  scale_y_log10() +
+  scale_x_yearqtr()
+```
+
+```{r}
+pos %>%
+  dplyr::select(pos, free, yq) %>%
+  group_by(yq) %>%
+  mutate(p = free/sum(free)) %>%
+  ggplot(data = .,
+         aes(x = yq,
+             y = p,
+             fill = pos)) +
+  geom_col(col = 'black') +
+  scale_x_yearqtr() +
+  scale_fill_brewer() -> p
+
+p
+```
+
+
+```{r}
+load("~/Documents/Uczelnia/Papers/In_preparation/Oferty pracy/data/bkl_oferty_to_analysis.rda")
+bkl_oferty_to_analysis
+```
+
+```{r}
+bkl_oferty_to_analysis %>%
+  select(komp_zaw:komp_biur,kod_zawodu_grupa_2) %>%
+  bind_cols(bkl_oferty_to_analysis %>%
+              mutate(kod_zawodu_grupa_2 = factor(kod_zawodu_grupa_2)) %>%
+              model.matrix(~kod_zawodu_grupa_2-1, data =.) %>%
+              as.data.frame()) %>%
+  dplyr::select(-kod_zawodu_grupa_2) %>%
+  as.matrix() -> zawody
+
+t(zawody) %*% zawody -> M
+
+colnames(zawody)
+
+res <- ca::ca(M[colnames(zawody)[1:12],colnames(zawody)[13:20]])
+plot(res)
+```
+
+```{r}
+pos %>%
+  count(pos)
+bkl_oferty_to_analysis %>%
+  count(dane_rok,forma_ogl,kod_zawodu_grupa_2) %>%
+  group_by(dane_rok,forma_ogl) %>%
+  mutate(p = n/sum(n)) %>%
+  ggplot(data = .,
+         aes(x = factor(dane_rok),
+             y = p,
+             fill = factor(kod_zawodu_grupa_2))) +
+  geom_col(col = 'black') +
+  scale_fill_brewer() + 
+  facet_wrap(~forma_ogl) 
+```
+

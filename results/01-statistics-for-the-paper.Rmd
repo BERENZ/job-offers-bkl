@@ -1,0 +1,1254 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+ Packages
+
+```{r}
+library(tidyverse)
+library(lme4)
+library(xtable)
+library(VIM)
+library(stringi)
+library(bbmle)
+library(survey)
+library(glmnet)
+library(partykit)
+library(rsample)
+library(laeken)
+source('../codes/adaptive-lasso.R')
+```
+
+## Read the raw data -- before imputation
+
+# Reproduce Table 1 
+
+```{r}
+bkl <- readRDS("../data/bkl-oferty.rds") %>%
+  mutate(zawod9  = ifelse(!is.na(zawod), substr(zawod,1,1), zawod_9grup),
+         woj = ifelse(woj == 0, NA, woj)) 
+
+bkl %>%
+  count(year=rok) %>%
+  spread(year, n) %>%
+  mutate(source = 'Total') %>%
+  bind_rows(
+    bkl %>%
+      count(year = rok, source = zrodlo) %>%
+      mutate(source = factor(source, 1:2, c('Internet', 'DLOs'))) %>%
+      spread(year, n)
+  ) %>% 
+  dplyr::select(source, everything()) %>%
+  xtable() %>%
+  print.xtable(include.rownames = F)
+
+```
+
+
+Reproduce Table 2
+
+```{r}
+bkl %>%
+  filter(rok %in% c(2011, 2013, 2014)) %>%
+  group_by(zrodlo) %>%
+  summarise_at(vars(starts_with('komp')),funs(mean)) %>%
+  dplyr::select(-komp_zawodowe) %>%
+  rename(Technical = komp_techniczne,
+         Mathematical = komp_matematyczne,
+         Artistic = komp_kulturalne, 
+         Computer = komp_komputerowe, 
+         Cognitive = komp_kognitywne, 
+         Managerial = komp_kierownicze, 
+         Interpersonal = komp_interpersonalne, 
+         `Self-organization` = komp_indywidualne, 
+         Physical = komp_fizyczne,
+         Availability = komp_dyspozycyjne, 
+         Office = komp_biurowe) %>%
+  gather(Competences, values, -zrodlo) %>%
+  mutate(zrodlo = factor(zrodlo, 1:2, c('Internet','DLO')),
+         values = values*100) %>%
+  spread(zrodlo, values) %>%
+  xtable(digits = 2, 
+         caption = 'Share of competences included in data sources',
+         label = 'comp-sources') %>%
+  print.xtable(table.placement = 'ht!', 
+               caption.placement = 'top', 
+               comment = F, timestamp = F, 
+               include.rownames = F)
+```
+
+Reproduce Spearman correlation coefficient
+
+```{r}
+bkl %>%
+  filter(rok %in% c(2011, 2013, 2014)) %>%
+  group_by(zrodlo) %>%
+  summarise_at(vars(starts_with('komp')),funs(mean)) %>%
+  dplyr::select(-komp_zawodowe) %>%
+  rename(Technical = komp_techniczne,
+         Mathematical = komp_matematyczne,
+         Artistic = komp_kulturalne, 
+         Computer = komp_komputerowe, 
+         Cognitive = komp_kognitywne, 
+         Managerial = komp_kierownicze, 
+         Interpersonal = komp_interpersonalne, 
+         `Self-organization` = komp_indywidualne, 
+         Physical = komp_fizyczne,
+         Availability = komp_dyspozycyjne, 
+         Office = komp_biurowe) %>%
+  gather(Competences, values, -zrodlo) %>%
+  mutate(zrodlo = factor(zrodlo, 1:2, c('Internet','DLO')),
+         values = values*100) %>%
+  spread(zrodlo, values) %>%
+  dplyr::select(-Competences) %>%
+  cor(method = 's')
+```
+
+## Missing data imputation
+
+# Reproduce Figure 1
+
+```{r}
+bkl %>%
+  filter(rok %in% c(2011,2013,2014)) %>%
+  dplyr::select(occupation = zawod9, 
+         voivodeship = woj, 
+         nace = sekcja_pkd) %>%
+  aggr(plot = F) -> bkl_missingi
+
+bkl_missingi %>%
+  plot.aggr(col = c('white','gray'), cex.axis = .8) 
+
+summary(bkl_missingi)
+
+Cairo::CairoPDF(file = '../paper/images/missings-aggr.pdf',width = 8, height = 5)
+bkl_missingi %>%
+  plot.aggr(col = c('white','gray'), cex.axis = .8) 
+dev.off()
+```
+
+```{r}
+bkl %>%
+  filter(rok %in% c(2011,2013,2014)) %>%
+  group_by(rok) %>%
+  summarise(occupation = mean(is.na(zawod9)),
+            voivodeship  = mean(is.na(woj)),
+            nace = mean(is.na(sekcja_pkd))) %>%
+  mutate_at(vars(occupation:nace), funs(.*100)) %>%
+  gather(vars, miss, -rok) %>%
+  spread(rok, miss)  %>%
+  xtable(digits = 2, 
+         caption = 'Missing data in selected variables in each wawe of the Human Capital in Poland survey',
+         label = 'missing-data-wawes') %>%
+  print.xtable(table.placement = 'ht!', 
+               caption.placement = 'top', 
+               comment = F, timestamp = F, 
+               include.rownames = F)
+```
+
+Prepare for imputation
+
+```{r}
+bkl_to_imp <- bkl %>% 
+  filter(rok > 2010) %>%
+  filter(!is.na(zawod9)) %>%
+  filter(!is.na(woj)) %>%
+  mutate(zawod_6_imp = ifelse(is.na(zawod),
+                            stri_pad_right(zawod9,6,0),
+                            stri_pad_right(zawod,6,0)))%>%
+  mutate(zawod_5_imp = substr(zawod_6_imp,1,5),
+         zawod_4_imp = substr(zawod_6_imp,1,4),
+         zawod_3_imp = substr(zawod_6_imp,1,3),
+         zawod_2_imp = substr(zawod_6_imp,1,2),
+         woj = stri_pad_left(woj,2,0),
+         flag = !is.na(sekcja_pkd),
+         sekcja_pkd = as.character(sekcja_pkd),
+         sekcja_pkd2 = stri_paste(sekcja_pkd,'z'))
+
+bkl_to_imp %>%
+  count(is.na(sekcja_pkd2))
+```
+
+```{r}
+bkl_to_imp %>% 
+  filter(!rok %in% c(2010, 2012)) %>%
+  count(zeros = stri_count(str = zawod_6_imp, fixed = '0')) %>%
+  xtable() %>%
+  print.xtable(include.rownames = F)
+
+bkl_to_imp %>% 
+  filter(!rok %in% c(2010)) %>%
+    count(zeros = stri_count(str = stri_pad_right(sekcja_pkd,3,0), fixed = '0')) %>%
+  xtable() %>%
+  print.xtable(include.rownames = F) 
+```
+
+
+```{r}
+set.seed(123)
+
+bkl_to_imp_1 <- hotdeck(data = bkl_to_imp, 
+                        variable = c('sekcja_pkd2'),
+                        domain_var = c('zawod_5_imp','woj'))
+
+bkl_to_imp_1 %>% count(sekcja_pkd2 == 1)
+
+bkl_to_imp_1 <- bkl_to_imp_1 %>%
+  mutate(sekcja_pkd2 = ifelse(sekcja_pkd2_imp & sekcja_pkd2 == 1, NA, sekcja_pkd2)) %>%
+  dplyr::select(-sekcja_pkd2_imp)
+
+
+bkl_to_imp_2 <- hotdeck(data = bkl_to_imp_1, 
+                        variable = c('sekcja_pkd2'),
+                        domain_var = c('zawod_4_imp','woj'))
+
+bkl_to_imp_2 %>% count(sekcja_pkd2 == 1)
+
+
+bkl_to_imp_2 <- bkl_to_imp_2 %>%
+  mutate(sekcja_pkd2 = ifelse(sekcja_pkd2_imp & sekcja_pkd2 == 1, NA, sekcja_pkd2)) %>%
+  dplyr::select(-sekcja_pkd2_imp)
+
+bkl_to_imp_3 <- hotdeck(data = bkl_to_imp_2, 
+                        variable = c('sekcja_pkd2'),
+                        domain_var = c('zawod_3_imp','woj'))
+
+bkl_to_imp_3 %>% count(sekcja_pkd2 == 1)
+
+
+bkl_to_imp_3 <- bkl_to_imp_3 %>%
+  mutate(sekcja_pkd2 = ifelse(sekcja_pkd2_imp & sekcja_pkd2 == 1, NA, sekcja_pkd2)) %>%
+  dplyr::select(-sekcja_pkd2_imp)
+
+bkl_to_imp_4 <- hotdeck(data = bkl_to_imp_3, 
+                        variable = c('sekcja_pkd2'),
+                        domain_var = c('zawod_2_imp','woj'))
+
+bkl_to_imp_4 %>% count(sekcja_pkd2 == 1)
+
+
+
+bkl_to_imp_4 <- bkl_to_imp_4 %>%
+  mutate(sekcja_pkd2 = ifelse(sekcja_pkd2_imp & sekcja_pkd2 == 1, NA, sekcja_pkd2)) %>%
+  dplyr::select(-sekcja_pkd2_imp)
+
+bkl_to_imp_5 <- hotdeck(data = bkl_to_imp_4, 
+                        variable = c('sekcja_pkd2'),
+                        domain_var = c('zawod_5_imp'))
+
+bkl_to_imp_5 %>% count(sekcja_pkd2 == 1)
+
+bkl_to_imp_5 <- bkl_to_imp_5 %>%
+  mutate(sekcja_pkd2 = ifelse(sekcja_pkd2_imp & sekcja_pkd2 == 1, NA, sekcja_pkd2)) %>%
+  dplyr::select(-sekcja_pkd2_imp)
+
+
+bkl_to_imp_6 <- hotdeck(data = bkl_to_imp_5, 
+                        variable = c('sekcja_pkd2'),
+                        domain_var = c('zawod_2_imp'))
+
+bkl_to_imp_6 %>% filter(sekcja_pkd2 == 1)
+
+```
+
+
+```{r}
+bkl_to_imp_6 %>%
+  count(sekcja_pkd2) %>%
+  left_join(
+    bkl_to_imp_6 %>%
+      filter(!flag) %>%
+      count(sekcja_pkd2) %>%
+      rename(n_przed = n)
+  ) %>%
+  na.omit() %>%
+  mutate(p = n / sum(n),
+         p_przed = n_przed / sum(n_przed)) %>%
+  ggplot(data = .,
+         aes(x = p_przed,
+             y = p)) +
+  geom_point() +
+  geom_abline()
+```
+
+Add main NACE sections
+
+```{r}
+pkd <- readxl::read_excel('../data-raw/pkd2007.xls', sheet = 3) %>%
+  dplyr::select(symbol, nazwa) %>%
+      mutate(nazwa = stringi::stri_trim_both(tolower(nazwa)),
+             sekcja_pkd_glowna = ifelse(grepl('^[A-Z]$',symbol),symbol,NA),
+             sekcja_pkd_dzial = ifelse(grepl('^(\\d{2}|\\d{2}\\.\\d{1})$', symbol), symbol,NA),
+             sekcja_pkd_dzial = gsub('\\.','',sekcja_pkd_dzial),
+             sekcja_pkd_dzial = stri_pad_left(sekcja_pkd_dzial,3,0)) %>%
+  tidyr::fill(sekcja_pkd_glowna) %>%
+  group_by(sekcja_pkd_glowna) %>%
+  tidyr::fill(sekcja_pkd_dzial) %>%
+  tidyr::fill(sekcja_pkd_dzial, .direction = 'up') %>%
+  count(symbol,sekcja_pkd_glowna,sekcja_pkd_dzial,nazwa) %>%
+  dplyr::select(-n) %>%
+  ungroup() %>%
+  count(nace = sekcja_pkd_glowna,sekcja_pkd2=sekcja_pkd_dzial)
+
+pkd
+```
+
+```{r}
+bkl_to_imp_6 %>%
+  mutate(sekcja_pkd2 = gsub('z','',sekcja_pkd2),
+         sekcja_pkd2 = stri_pad_right(sekcja_pkd2,3,0)) %>%
+  left_join(pkd %>% dplyr::select(-n)) %>%
+  mutate(nace = case_when(is.na(nace) & sekcja_pkd2 %in% 100:330 ~ 'C',
+                          is.na(nace) & sekcja_pkd2 %in% 350 ~ 'D',
+                          is.na(nace) & sekcja_pkd2 %in% 380 ~ 'E',
+                          is.na(nace) & sekcja_pkd2 %in% 410:430 ~ 'F',
+                          is.na(nace) & sekcja_pkd2 %in% 450:470 ~ 'G',
+                          is.na(nace) & sekcja_pkd2 %in% 490:530 ~ 'H',
+                          is.na(nace) & sekcja_pkd2 %in% 550:560 ~ 'I',
+                          is.na(nace) & sekcja_pkd2 %in% 580:630 ~ 'J',
+                          is.na(nace) & sekcja_pkd2 %in% 640:660 ~ 'K',
+                          is.na(nace) & sekcja_pkd2 %in% 680 ~ 'L',
+                          is.na(nace) & sekcja_pkd2 %in% 690:740 ~ 'M',
+                          is.na(nace) & sekcja_pkd2 %in% 770:820 ~ 'N',
+                          is.na(nace) & sekcja_pkd2 %in% 840 ~ 'O',
+                          is.na(nace) & sekcja_pkd2 %in% 850 ~ 'P',
+                          is.na(nace) & sekcja_pkd2 %in% 860:890 ~ 'Q',
+                          is.na(nace) & sekcja_pkd2 %in% 930 ~ 'R',
+                          is.na(nace) & sekcja_pkd2 %in% 940:950 ~ 'S',
+                          TRUE ~ nace)) -> bkl_imputed
+
+
+
+saveRDS(bkl_imputed, file = '../data/bkl-imputed-data.rds')
+bkl_imputed <- readRDS('../data/bkl-imputed-data.rds')
+```
+
+
+Correlation prior imputation
+
+```{r}
+bkl_imputed %>%
+  filter(rok %in% c(2011,2013:2014), zawod_2_imp != '20') %>%
+  #filter(flag) %>%
+    dplyr::select(zawod_2_imp, nace, woj, komp_techniczne:komp_biurowe) %>%
+  rename(Technical = komp_techniczne,
+         Mathematical = komp_matematyczne,
+         Artistic = komp_kulturalne, 
+         Computer = komp_komputerowe, 
+         Cognitive = komp_kognitywne, 
+         Managerial = komp_kierownicze, 
+         Interpersonal = komp_interpersonalne, 
+         `Self-organization` = komp_indywidualne, 
+         Physical = komp_fizyczne,
+         Availability = komp_dyspozycyjne, 
+         Office = komp_biurowe) %>%
+  gather(Competences, vals, -zawod_2_imp,-nace,-woj)  %>%
+  group_by(Competences) %>%
+  do(occupation = vcd::assocstats(xtabs(~zawod_2_imp+ vals, data= .))$cramer,
+     NACE = vcd::assocstats(xtabs(~nace+ vals, data= .))$cramer,
+     voivodeship = vcd::assocstats(xtabs(~woj+ vals, data= .))$cramer) %>%
+  unnest() %>%
+  xtable(., digits = 2, caption = "Cramer's V between competences and occupation, NACE and voivodeship for 2011, 2013 and 2014", label = 'vcramers') %>%
+  print.xtable(include.rownames = F, caption.placement = 'top', table.placement = 'ht!')
+```
+
+
+Final dataset -- 
+
+```{r}
+bkl_imputed %>%
+  filter(zawod9 != 6, 
+         zrodlo == 1, 
+         rok %in% c(2011,2013,2014),
+         zawod_2_imp != '20',
+         nace != 'U') -> bkl_for_analysis
+
+bkl_for_analysis %>%
+  count(rok, nace) %>%
+  group_by(rok) %>%
+  mutate(p = n/sum(n)) %>%
+  ggplot(data = .,
+         aes(x = rok,
+             y = p,
+             group = nace,
+             color = nace)) +
+  geom_line()
+
+bkl_for_analysis %>%
+  count(nace)
+
+ #C, J, K, M, 
+```
+
+ Totals
+
+ compare totals
+
+
+```{r}
+load("/Users/MaciejBeresewicz/Documents/Projects/RProjects/Naukowe/job-offers/data/totals_job_demand_quarterly.rda")
+
+nace_stratas <- c("C", "F", "G", "H", "I", "J", "M", "O", "Q")
+woj_stratas <- c("02", "10", "12", "14", "22", "24", "30")
+
+woj <- readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+  filter(rok > 2010, rok < 2015, kw == 1) %>%
+  mutate(woj = ifelse(woj %in% woj_stratas, woj, 'other')) %>%
+  count(rok, woj, wt = total)
+
+readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+  filter(rok > 2010) %>%
+  count(rok, kw, group, wt = total) %>%
+  group_by(rok, kw) %>%
+  mutate(p = n/sum(n)*100)
+  filter(rok %in% c(2011,2013,2015), kw == 1, group != 6) %>%
+  count(rok, position_code, wt = total)
+```
+
+```{r}
+readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+  filter(rok %in% c(2011,2013:2014), group != 6) %>% 
+  count(rok, position_code = as.character(position_code), wt = total)  %>%
+  left_join( 
+    bkl_imputed  %>%
+  filter(rok  %in% c(2011,2013:2014)) %>%
+  count(rok, position_code = zawod_2_imp) %>%
+    rename(bkl = n)
+  ) %>%
+  mutate(p = bkl / n)
+
+readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+  filter(rok %in% c(2011,2013:2014), group != 6) %>% 
+  count(rok, position_code = as.character(position_code), wt = total) %>%
+  #mutate(flag = n < 1000) %>%
+  spread(rok, n)
+## male grupy 11, 14, 53, 92, 95 
+### laczenie 12 = 11 + 12 + 14; 54 = 53 + 54; 93 = 92 + 93; 96 = 95 + 95
+### 
+
+readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+  filter(rok %in% c(2011,2013:2014), group != 6) %>% 
+  mutate(position_code = as.character(position_code),
+         occup = case_when(position_code %in% c(11,12,14) ~ '12',
+                           position_code %in% c(53,54) ~ '54',
+                           position_code %in% c(92,93) ~ '93',
+                           position_code %in% c(95,96) ~ '96',
+                           TRUE ~ position_code)) %>%
+  count(rok, occup, wt = total)  %>%
+  spread(rok, n)
+
+bkl_for_analysis %>%
+  mutate(occup = case_when(zawod_2_imp %in% c(11,12,14) ~ '12',
+                           zawod_2_imp %in% c(53,54) ~ '54',
+                           zawod_2_imp %in% c(92,93) ~ '93',
+                           zawod_2_imp %in% c(95,96,99) ~ '96',
+                           TRUE ~ zawod_2_imp)) %>%
+  count(rok, occup)  %>%
+  rename(sample = n) %>%
+  left_join(readRDS('~/Documents/Projects/RProjects/Naukowe/job-offers/data/jobs_demand.rds') %>%
+  filter(rok %in% c(2011,2013:2014), group != 6) %>% 
+  mutate(position_code = as.character(position_code),
+         occup = case_when(position_code %in% c(11,12,14) ~ '12',
+                           position_code %in% c(53,54) ~ '54',
+                           position_code %in% c(92,93) ~ '93',
+                           position_code %in% c(95,96) ~ '96',
+                           TRUE ~ position_code)) %>%
+  count(rok, occup, wt = total)) %>%
+  group_by(occup1 = substr(occup,1,1)) %>%
+  summarise(sample = sum(sample),
+            total = sum(n)) %>%
+  mutate(p_sample = sample / sum(sample)*100,
+         p_total = total / sum(total)*100) %>%
+  dplyr::select(occup1, p_sample, p_total) %>%
+  xtable(., digits = 1)
+
+```
+
+
+```{r}
+liczba_ofert_zawod_pkd %>%
+  mutate(rok = as.numeric(rok),
+         values = as.numeric(values)) %>%
+  filter(kw == "I", rok %in% 2011:2014) %>%
+  filter(grepl('^\\d{1}\\.', zawod)) %>%
+  filter(sekcje == 'OGÓŁEM')  %>%
+  filter(!grepl('ROLNICY',zawod)) %>%
+  mutate(zawod = readr::parse_number(zawod),
+         sekcje = as.character(sekcje)) %>%
+  dplyr::select(-kw) %>%
+  rename(totals = values,
+         occup = zawod,
+         nace = sekcje) %>%
+  arrange(rok, occup, nace) %>%
+  group_by(occup, rok, nace) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  mutate(nace = ifelse(nace %in% c("C", "F", "G", "H", "I", "J", "M", "O", "Q"), nace_stratas, 'other')) %>%
+  count(rok, occup, nace, wt= totals) %>%
+  rename(totals = n) -> occup_section_totals
+
+occup_section_totals %>%
+  count(rok, wt = totals) %>%
+  left_join(
+    woj %>%
+      count(rok, wt  = n)
+  ) %>%
+  mutate(fac = n/nn) -> decrease_no
+ 
+```
+
+```{r}
+bind_rows(
+  
+occup_section_totals %>%
+  count(occup, wt = totals) %>%
+  group_by(rok) %>%
+  mutate(p = n /sum(n)*100) %>%
+  dplyr::select(-n) %>%
+  spread(rok, p) %>%
+  mutate(occup = as.character(occup),
+         lab = 'occup') %>%
+  rename(var = occup),
+
+occup_section_totals %>% 
+  count(nace, wt = totals) %>%
+  group_by(rok) %>%
+  mutate(p = n /sum(n)*100) %>%
+  dplyr::select(-n) %>%
+  spread(rok, p)  %>%
+  mutate(nace = as.character(nace),
+         lab = 'nace') %>%
+  rename(var = nace),
+
+woj %>%
+  left_join(
+    decrease_no %>% dplyr::select(rok, fac)
+  ) %>%
+  mutate(n = n*fac) %>%
+  dplyr::select(-fac) %>%
+  count(woj, wt = n) %>%
+  group_by(rok) %>%
+  mutate(p = nn /sum(nn)*100) %>%
+  dplyr::select(-nn) %>%
+  spread(rok, p)  %>%
+  mutate(lab = 'woj') %>%
+  rename(var = woj)
+)   -> dist_pop
+
+dist_pop
+```
+
+```{r}
+bkl_for_analysis %>%
+  mutate(nace2 = nace,
+         nace = ifelse(nace %in% nace_stratas, nace, 'other'),
+         woj2 = woj,
+         woj = ifelse(woj %in% woj_stratas, woj, 'other')) %>%
+  rename(occup = zawod9) -> bkl_for_analysis
+
+bind_rows(
+bkl_for_analysis %>%
+  count(occup) %>%
+  group_by(rok) %>%
+  mutate(p = n/ sum(n)*100) %>%
+  dplyr::select(-n) %>%
+  spread(rok, p) %>%
+  mutate(lab = 'occup') %>%
+  rename(var = occup),
+bkl_for_analysis %>%
+  count(woj) %>%
+  group_by(rok) %>%
+  mutate(p = n/ sum(n)*100) %>%
+  dplyr::select(-n) %>%
+  spread(rok, p) %>%
+  mutate(lab = 'woj')  %>%
+  rename(var = woj),
+bkl_for_analysis %>%
+  count(nace) %>%
+  group_by(rok) %>%
+  mutate(p = n/ sum(n)*100) %>%
+  dplyr::select(-n) %>%
+  spread(rok, p) %>%
+  mutate(lab = 'nace')  %>%
+  rename(var = nace)) -> dist_sample
+```
+
+```{r}
+bind_rows(dist_sample %>%
+  mutate(dist  = 'sample'),
+dist_pop %>%
+  mutate(dist  = 'pop')) %>%
+  spread(dist, p) %>%
+  arrange(lab, var) %>%
+  ungroup() %>% 
+  dplyr::select(lab, var, pop, sample) %>%
+  xtable(digits = 1) %>%
+  print.xtable(include.rownames = F)
+  
+```
+
+
+```{r}
+bkl_for_analysis %>%
+  count(rok, nace) %>%
+  left_join(
+    occup_section_totals %>%
+  count(rok, nace, wt = totals) %>%
+    rename(totals = n)
+  ) %>%
+  mutate(rok2 = scale(rok),
+         n = ifelse(n > totals, totals, n))  -> nace_model
+
+bkl_for_analysis %>%
+  count(rok, occup ) %>%
+  left_join(
+    occup_section_totals %>%
+      mutate(occup = as.character(occup)) %>%
+      count(rok, occup, wt = totals) %>%
+    rename(totals = n)
+  ) %>%
+  mutate(rok2 = scale(rok)) -> occup_model
+
+bkl_for_analysis %>%
+  count(rok, woj) %>%
+  left_join(
+    woj %>% 
+    left_join(
+    decrease_no %>% dplyr::select(rok, fac)
+  ) %>%
+  mutate(n = n*fac) %>%
+  dplyr::select(-fac) %>%
+    rename(totals = n)
+  ) %>%
+  mutate(rok2 = scale(rok)) -> woj_model
+```
+
+# Correlation
+
+```{r}
+bkl_imputed %>%
+  filter(rok %in% 2013:2014) %>%
+    dplyr::select(zawod_2_imp, nace, woj, komp_techniczne:komp_biurowe) %>%
+  rename(Technical = komp_techniczne,
+         Mathematical = komp_matematyczne,
+         Artistic = komp_kulturalne, 
+         Computer = komp_komputerowe, 
+         Cognitive = komp_kognitywne, 
+         Managerial = komp_kierownicze, 
+         Interpersonal = komp_interpersonalne, 
+         `Self-organization` = komp_indywidualne, 
+         Physical = komp_fizyczne,
+         Availability = komp_dyspozycyjne, 
+         Office = komp_biurowe) %>%
+  gather(Competences, vals, -zawod_2_imp,-nace,-woj)  %>%
+  group_by(Competences) %>%
+  do(occupation = vcd::assocstats(xtabs(~zawod_2_imp+ vals, data= .))$cramer,
+     NACE = vcd::assocstats(xtabs(~nace+ vals, data= .))$cramer,
+     voivodeship = vcd::assocstats(xtabs(~woj+ vals, data= .))$cramer) %>%
+  unnest() %>%
+  xtable(., digits = 2, caption = "Cramer's V between competences and occupation, NACE and voivodeship for 2011-2014", label = 'vcramers') %>%
+  print.xtable(include.rownames = F, caption.placement = 'top', table.placement = 'ht!')
+```
+
+
+```{r}
+bkl_imputed %>%
+  dplyr::select(komp_kulturalne:komp_biurowe) %>%
+  rename(Artistic = komp_kulturalne, 
+         Computer = komp_komputerowe, 
+         Cognitive = komp_kognitywne, 
+         Managerial = komp_kierownicze, 
+         Interpersonal = komp_interpersonalne, 
+         `Self-organization` = komp_indywidualne, 
+         Physical = komp_fizyczne,
+         Availability = komp_dyspozycyjne, 
+         Office = komp_biurowe) %>%
+  ltm::descript()
+```
+
+# Propensity scores 
+
+
+## Models for propensity
+
+```{r}
+nace_model_glm <- glm(formula = cbind(n, totals-n) ~ rok2 + nace,
+                      data = nace_model,
+                      family = binomial(link = 'logit'),
+                      contrasts  = list(nace = 'contr.sum'))
+
+occup_model_glm <- glm(formula = cbind(n, totals-n) ~ rok2 + occup,
+                      data = occup_model,
+                      family = binomial(link = 'logit'),
+                      contrasts  = list(occup = 'contr.sum'))
+
+woj_model_glm <- glm(formula = cbind(n, totals-n) ~ rok2 + woj,
+                      data = woj_model %>% mutate(totals = round(totals)),
+                      family = binomial(link = 'logit'),
+                      contrasts  = list(woj = 'contr.sum'))
+
+bind_rows(BaylorEdPsych::PseudoR2(occup_model_glm)[c(1:2,6)] %>%
+  as.data.frame() %>%
+  rownames_to_column('stat') %>%
+  rename(pseudoR2 = 2) %>%
+  mutate(model = 'Occupation'),
+BaylorEdPsych::PseudoR2(nace_model_glm)[c(1:2,6)]  %>%
+  as.data.frame() %>%
+  rownames_to_column('stat') %>%
+  rename(pseudoR2 = 2) %>%
+  mutate(model = 'NACE'),
+BaylorEdPsych::PseudoR2(woj_model_glm)[c(1:2,6)]  %>%
+  as.data.frame() %>%
+  rownames_to_column('stat') %>%
+  rename(pseudoR2 = 2) %>%
+  mutate(model = 'Woj')) %>%
+  mutate(pseudoR2 = pseudoR2 *100) %>%
+  spread(model, pseudoR2) %>%
+  dplyr::select(stat, Woj, NACE, Occupation) %>%
+  xtable()
+```
+
+```{r}
+fitted(occup_model_glm) %>%
+  summary()
+```
+
+```{r}
+bkl_for_analysis %>%
+  left_join( 
+    occup_model %>%
+      mutate(rho = fitted(occup_model_glm)) %>%
+      count(rok, occup, rho) %>%
+      dplyr::select(-nn))  -> bkl_for_analysis
+
+bkl_for_analysis %>%
+  left_join(
+    occup_section_totals %>%
+      count(rok, wt = totals) %>%
+      rename(N = n)
+  ) %>% 
+  group_by(rok) %>%
+  mutate(simple_weight = N / n()) -> bkl_for_analysis
+
+bkl_for_analysis
+```
+
+ Calibration
+
+ Totals
+
+```{r}
+totals_occup_tab <- xtabs(totals ~ rok + occup,  data = occup_section_totals)
+totals_nace_tab <- xtabs(totals ~ rok + nace,  data = occup_section_totals)
+
+totals_woj_tab <- xtabs(n ~ rok + woj, data = woj %>%
+  left_join(
+    decrease_no %>% dplyr::select(rok, fac)
+  ) %>%
+  mutate(n = n*fac) %>%
+  dplyr::select(-fac))
+```
+
+ simple random sampling
+
+
+```{r}
+bkl_for_analysis %>%
+  mutate(occup = case_when(zawod_2_imp %in% c(11,12,14) ~ '12',
+                           zawod_2_imp %in% c(53,54) ~ '54',
+                           zawod_2_imp %in% c(92,93) ~ '93',
+                           zawod_2_imp %in% c(95,96,99) ~ '96',
+                           TRUE ~ zawod_2_imp)) -> bkl_for_analysis
+
+saveRDS(bkl_for_analysis, file = '../data/bkl-finalne-model.rds')
+```
+
+```{r}
+set.seed(123)
+
+bkl_for_analysis %>%
+  group_by(rok) %>%
+  mutate(id_off = row_number()) %>%
+  arrange(rok, occup, nace, woj) %>%
+  do(boots = bootstraps(data =., times = 1)) -> bootstrapy
+
+bkl_boot <- bootstrapy$boots %>% 
+  map_df(~.x %>% mutate(d=map(splits, analysis)) %>% unnest(d))
+
+```
+
+ bootstrap for all variables 
+
+
+```{r}
+bkl_boot %>%
+  mutate(rok = as.character(rok)) %>% 
+  group_by(id) %>%
+  do(svy = svydesign(ids= ~1, weights = ~simple_weight, data = . ),
+     data = dplyr::select(., id_off, rok,nace,woj, occup, komp_techniczne:komp_biurowe, rho) %>%
+       mutate(rho_w = 1/rho)) %>%
+  group_by(id) %>%
+  do(cal_occup_lin = .$svy[[1]] %>% calibrate(formula = list(~rok + occup),
+                                              calfun = 'linear',
+                                              population = list(totals_occup_tab),
+                                              sparse = TRUE) %>% weights(),
+     cal_nace_lin = .$svy[[1]] %>% calibrate(formula = list(~rok + nace),
+                                              calfun = 'linear',
+                                              population = list(totals_nace_tab),
+                                              sparse = TRUE) %>% weights(), 
+     cal_woj_lin = .$svy[[1]] %>% calibrate(formula = list(~rok + woj),
+                                              calfun = 'raking',
+                                              population = list(totals_woj_tab),
+                                              sparse = TRUE) %>% weights(),
+     data = .$data[[1]])  -> m3
+
+wagi <- m3 %>% unnest()
+summary(wagi)
+```
+
+ Lasso model-assisted with occup
+
+```{r}
+occup_tot_rok <- occup_section_totals %>% 
+  count(rok, occup, wt = totals)  %>%
+  mutate(rok2 = scale(rok))
+X_occup <- cbind(occup_tot_rok$rok2,calibVars(occup_tot_rok[,'occup']))
+colnames(X_occup)[1] <- 'rok2'
+
+bkl_boot  %>%
+  mutate(rok2 = scale(rok)) %>%
+  group_by(id) %>%
+  do(komp_techniczne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_techniczne),
+      komp_matematyczne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_matematyczne),
+      komp_kulturalne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_kulturalne),
+      komp_komputerowe = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_komputerowe),
+      komp_kognitywne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_kognitywne),
+      komp_kierownicze = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_kierownicze),
+      komp_interpersonalne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_interpersonalne),
+      komp_indywidualne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_indywidualne),
+      komp_fizyczne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_fizyczne),
+      komp_dyspozycyjne = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_dyspozycyjne),
+     komp_biurowe = adaptive_lasso(x = cbind(.$rok2, calibVars(.$occup)), y = .$komp_biurowe),
+     occup = X_occup,
+     occup2 = occup_tot_rok) %>%
+  group_by(id) %>%
+do(komp_techniczne = predict(.$komp_techniczne[[1]]$adalasso, newx = .$occup[[1]],  
+                             s = .$komp_techniczne[[1]]$adalasso_cv$lambda.min, 
+                             type = "response") %>% as.numeric(),
+    komp_matematyczne = predict(.$komp_matematyczne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_matematyczne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_kulturalne = predict(.$komp_kulturalne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_kulturalne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_komputerowe = predict(.$komp_komputerowe[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_komputerowe[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_kognitywne = predict(.$komp_kognitywne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_kognitywne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_kierownicze = predict(.$komp_kierownicze[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_kierownicze[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_interpersonalne = predict(.$komp_interpersonalne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_interpersonalne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_indywidualne = predict(.$komp_indywidualne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_indywidualne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_fizyczne = predict(.$komp_fizyczne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_fizyczne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_dyspozycyjne = predict(.$komp_dyspozycyjne[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_dyspozycyjne[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+    komp_biurowe = predict(.$komp_biurowe[[1]]$adalasso, newx = .$occup[[1]],  
+                              s = .$komp_biurowe[[1]]$adalasso_cv$lambda.min, 
+                              type = "response") %>% as.numeric(),
+   occup = .$occup2[[1]]) -> res_lasso
+
+  res_lasso %>%
+  group_by(id) %>%
+  do(totals = data.frame(.$occup[[1]] %>% dplyr::select(-rok2),
+    komp_techniczne=.$komp_techniczne[[1]],
+    komp_matematyczne =.$komp_matematyczne[[1]],
+    komp_kulturalne = .$komp_kulturalne[[1]],
+    komp_komputerowe= .$komp_komputerowe[[1]],
+    komp_kognitywne=.$komp_kognitywne[[1]],
+    komp_kierownicze = .$komp_kierownicze[[1]],
+    komp_interpersonalne = .$komp_interpersonalne[[1]],
+    komp_indywidualne = .$komp_indywidualne[[1]],
+    komp_fizyczne = .$komp_fizyczne[[1]],
+    komp_dyspozycyjne = .$komp_dyspozycyjne[[1]],
+    komp_biurowe = .$komp_biurowe[[1]])) %>%
+    unnest(totals) %>% 
+    group_by(id, rok, occup) %>%
+    summarise_at(vars(komp_techniczne:komp_biurowe),mean) %>%
+    left_join(occup_tot_rok) %>%
+      gather(komps, vals, -rok, -occup, -n,-id) %>% 
+       mutate(yes = n*vals, no = n*(1-vals)) %>%
+       gather(y, totals, yes, no)  %>%
+    group_by(id) %>%
+    nest() %>%
+    group_by(id) %>%
+  do(komp_techniczne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_techniczne")),
+      komp_matematyczne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_matematyczne")),
+      komp_kulturalne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_kulturalne")),
+      komp_komputerowe = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_komputerowe")),
+      komp_kognitywne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_kognitywne")),
+      komp_kierownicze = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_kierownicze")),
+      komp_interpersonalne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_interpersonalne")),
+      komp_indywidualne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_indywidualne")),
+      komp_fizyczne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_fizyczne")),
+      komp_dyspozycyjne = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_dyspozycyjne")),
+      komp_biurowe = xtabs(totals ~ y + rok, data  = .$data[[1]] %>% filter(komps == "komp_biurowe"))) -> lasso_totals
+```
+
+
+```{r}
+bkl_boot  %>%
+  mutate(y = ifelse(komp_techniczne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_techniczne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_techniczne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_techniczne_cal
+
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_matematyczne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_matematyczne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_matematyczne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_matematyczne_cal
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_kulturalne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_kulturalne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_kulturalne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_kulturalne_cal
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_komputerowe == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_komputerowe_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_komputerowe[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_komputerowe_cal
+
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_kognitywne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_kognitywne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_kognitywne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_kognitywne_cal
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_kierownicze == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_kierownicze_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_kierownicze[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_kierownicze_cal
+
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_interpersonalne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_interpersonalne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_interpersonalne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_interpersonalne_cal
+
+ 
+bkl_boot  %>%
+  mutate(y = ifelse(komp_indywidualne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_indywidualne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_indywidualne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( )  -> komp_indywidualne_cal
+
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_fizyczne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_fizyczne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_fizyczne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest() %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( )  -> komp_fizyczne_cal
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_dyspozycyjne == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_dyspozycyjne_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_dyspozycyjne[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest()  %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( )  -> komp_dyspozycyjne_cal
+
+
+
+bkl_boot  %>%
+  mutate(y = ifelse(komp_biurowe == 1, 'yes', 'no'),
+         rok = as.character(rok)) %>%
+  group_by(id) %>%
+  nest() %>%
+  group_by(id) %>%
+  do(cal_vars = svydesign(ids= ~1, weights = ~simple_weight, data = .$data[[1]]),
+     data = .$data[[1]]) %>%
+  left_join(lasso_totals) %>%
+  group_by(id) %>%
+  do(komp_biurowe_cal_lasso = calibrate(design  = .$cal_vars[[1]],
+                                           formula = list(~ y + rok),
+                                           calfun = 'linear',
+                                           population = list(.$komp_biurowe[[1]]),
+                                           sparse = TRUE) %>% weights(),
+     data = dplyr::select(.$data[[1]], rok)) %>%
+  unnest()  %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>%
+  ungroup( ) -> komp_biurowe_cal
+
+```
+
+ 
+
+
+```{r}
+bkl_boot %>%
+  group_by(id) %>%
+  mutate(id_los = row_number()) %>% 
+  ungroup() %>% 
+  mutate(rok = as.character(rok)) %>%
+  left_join(komp_biurowe_cal) %>%
+  left_join(komp_dyspozycyjne_cal)  %>%
+  left_join(komp_fizyczne_cal)  %>%
+  left_join(komp_indywidualne_cal) %>%
+  left_join(komp_interpersonalne_cal) %>%
+  left_join(komp_kierownicze_cal) %>%
+  left_join(komp_kognitywne_cal) %>%
+  left_join(komp_komputerowe_cal) %>%
+  left_join(komp_kulturalne_cal) %>%
+  left_join(komp_matematyczne_cal) %>%
+  left_join(komp_techniczne_cal)  %>%
+  dplyr::select(rok, id, starts_with('komp'),-komp_zawodowe) %>%
+  gather(komp, val, komp_techniczne:komp_biurowe)   %>%
+  gather(komp_2, waga, ends_with('lasso')) %>%
+  mutate(komp_2 = gsub('_cal_lasso','',komp_2)) %>%
+  filter(komp == komp_2) %>%
+  group_by(id, rok, komp) %>%
+  summarise(m = weighted.mean(val, waga),
+            sum = sum(waga)) -> lasso_means
+
+```
+
+```{r}
+wagi %>%
+  group_by(rok,id) %>%
+  summarise_at(vars(komp_techniczne:komp_biurowe),
+               funs(mean_simple = mean(.), 
+                    mean_rho = weighted.mean(.,rho_w),
+                    mean_cal_occup = weighted.mean(., cal_occup_lin),
+                    mean_cal_rho_occup = weighted.mean(., cal_occup_lin*rho_w),
+                    #mean_cal_occup_nace_lin = weighted.mean(., cal_occup_nace_lin),
+                    #mean_cal_rho_occup_nace_lin = weighted.mean(., cal_occup_nace_lin*rho_w),
+                    mean_cal_nace = weighted.mean(., cal_nace_lin),
+                    mean_cal_rho_nace = weighted.mean(., cal_nace_lin*rho_w),
+                    mean_cal_woj = weighted.mean(., cal_woj_lin),
+                    mean_cal_rho_woj = weighted.mean(., cal_woj_lin*rho_w)))  %>%
+  gather(komps, value, 
+         komp_techniczne_mean_simple:komp_biurowe_mean_cal_rho_woj) %>%
+  separate(komps, into = c('komps','method'), sep = '_mean_') %>%
+  bind_rows(lasso_means %>% ungroup() %>% 
+              mutate(method = 'lasso', rok = as.character(rok)) %>% rename(value = m, komps = komp)) %>%
+  group_by(rok, komps, method) %>%
+  summarise(m = mean(value),
+            sd = sd(value)) %>%
+  filter(method %in% c('lasso','simple', 'cal_occup','cal_rho_occup','rho')) %>%
+  ggplot(data = .,
+         aes(x = rok,
+             y = m,
+             group = method,
+             color = method)) +
+  geom_line() +
+  facet_wrap(~komps)
+
+```
+
+
+```{r}
+wagi %>%
+  group_by(rok,id) %>%
+  summarise_at(vars(komp_techniczne:komp_biurowe),
+               funs(mean_simple = mean(.), 
+                    mean_rho = weighted.mean(.,rho_w),
+                    mean_cal_occup = weighted.mean(., cal_occup_lin),
+                    mean_cal_rho_occup = weighted.mean(., cal_occup_lin*rho_w),
+                    #mean_cal_occup_nace_lin = weighted.mean(., cal_occup_nace_lin),
+                    #mean_cal_rho_occup_nace_lin = weighted.mean(., cal_occup_nace_lin*rho_w),
+                    mean_cal_nace = weighted.mean(., cal_nace_lin),
+                    mean_cal_rho_nace = weighted.mean(., cal_nace_lin*rho_w),
+                    mean_cal_woj = weighted.mean(., cal_woj_lin),
+                    mean_cal_rho_woj = weighted.mean(., cal_woj_lin*rho_w)))  %>%
+  gather(komps, value, 
+         komp_techniczne_mean_simple:komp_biurowe_mean_cal_rho_woj) %>%
+  separate(komps, into = c('komps','method'), sep = '_mean_') %>%
+  bind_rows(lasso_means %>% ungroup() %>% 
+              mutate(method = 'lasso', rok = as.character(rok)) %>% rename(value = m, komps = komp)) %>%
+  group_by(id, rok, komps, method) %>%
+  summarise(m = mean(value)) %>%
+  group_by(rok, komps, method) %>%
+  summarise(sd = sd(m)) %>%
+  filter(method %in% c('lasso','simple', 'cal_occup','cal_rho_occup')) %>%
+  ggplot(data = .,
+         aes(x = method,
+             y = sd)) +
+  geom_boxplot() +
+  facet_wrap(~komps)
+  
+```
+
+ save results
+
+```{r}
+save(bkl_boot,  lasso_totals, bkl_for_analysis, file = '../results/sim-100.rda')
+```
+
