@@ -11,7 +11,11 @@ editor_options:
 library(tidyverse)
 library(data.table)
 library(readxl)
+library(VIM)
+library(vcd)
 ```
+
+## GUS Data
 
 Read raw data
 ```{r}
@@ -64,7 +68,7 @@ dir(path = "../data-raw", pattern = "*00", full.names = T) %>%
 
 ```{r}
 gus_sek %>%
-  count(kod2, wt = wolne)
+  count(rok, wt = wolne)
 ```
 
 
@@ -77,5 +81,35 @@ gus_sek %>%
   bind_rows(gus_woj %>% 
               mutate(kod2 = as.numeric(zawod2)) %>%
               select(rok, woj, kod1 = zawod1, kod2 , woj, wolne = liczba)) -> gus_dane
+```
+
+```{r}
+saveRDS(object = gus_dane, file = "../data/gus-woj-sek.rds")
+```
+
+## BKL Data
+
+```{r}
+nace_sek <- readRDS("../data/bkl-finalne-model.rds") %>%
+  ungroup() %>%
+  count(sekcja_pkd, nace) %>%
+  select(-n) %>%
+  filter(!is.na(sekcja_pkd))
+```
+
+```{r}
+bkl <- readRDS("../data/bkl-oferty.rds") %>%
+  filter(rok != 2010) %>%
+  mutate(woj = str_pad(woj, 2, "0", side = "left"),
+         sekcja_pkd = as.character(sekcja_pkd),
+         zawod_9grup = ifelse(is.na(zawod_9grup), substr(zawod,1,1), zawod_9grup)) %>%
+  rename(id = plik, zawod6 = zawod, zawod1 = zawod_9grup) %>%
+  left_join(nace_sek) %>%
+  select(id, rok, zrodlo, forma_ogl, zrodlo_dokladne, zawod1, zawod6, 
+         woj, podregion, nace, sekcja_pkd2, branza, wyksztalcenie, jezyk_angielski:komp_biurowe)
+```
+
+```{r}
+saveRDS(bkl, "../data/bkl-before-imp.rds")
 ```
 

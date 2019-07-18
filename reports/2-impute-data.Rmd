@@ -1,0 +1,108 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Packages for imputation
+
+```{r}
+library(VIM)
+library(tidyverse)
+```
+
+# Imputation
+
+Read the data
+
+```{r}
+bkl <- readRDS("../data/bkl-before-imp.rds") %>%
+  mutate(woj = ifelse(woj == "00", NA, woj)) %>%
+  mutate_at(vars(jezyk_angielski:komp_biurowe), as.logical) %>%
+  mutate_at(vars(zrodlo,podregion,branza,forma_ogl), as.character)
+
+bkl %>%
+  skimr::skim()
+```
+
+```{r}
+dput(names(bkl))
+```
+
+
+Imputation of missing data
+
+
+
+```{r}
+set.seed(123)
+imputed <- kNN(data = bkl,
+               variable = c("zawod1", "woj", "nace"), 
+               dist_var =  c("zawod1", "zrodlo", "forma_ogl", "branza", "jezyk_angielski", "jezyk_niemiecki", 
+                             "komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komputerowe", 
+                             "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
+                             "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe"),
+               k = 1, 
+               addRF = TRUE,
+               weights = "auto", 
+               trace = TRUE)
+
+
+```
+
+
+```
+Detected as categorical variable:
+
+zrodlo,forma_ogl,zawod1,zawod6,woj,podregion,nace,sekcja_pkd2,branza,wyksztalcenie
+Detected as ordinal variable:
+
+
+Detected as numerical variable:
+
+id,rok,zrodlo_dokladne
+382items ofvariable:zawod1 imputed
+
+286items ofvariable:woj imputed
+
+29887items ofvariable:nace imputed
+
+Time difference of 1.577767 hours
+```
+
+```{r}
+saveRDS(imputed, "../data/bkl-after-imp.rds")
+```
+
+1. distribution of missing data
+2. impute based on the full dataset
+3. restrict only to Interent
+
+
+After imputation 
+
+```{r}
+dim(imputed)
+```
+
+
+```{r}
+imputed %>%
+  filter(zrodlo == 1) %>%
+  mutate(zawod2 = substr(zawod6,1,2),
+         zawod2 = ifelse(is.na(zawod6), zawod1, substr(zawod6,1,2)),
+         zawod2 = str_pad(string = zawod2, width = 2, side = "right", pad = "0"),
+         zawod6 = ifelse(is.na(zawod6), zawod1, zawod6),
+         zawod6 = str_pad(string = zawod6, width = 6, side = "right", pad = "0")) %>%
+  select(id, rok, zawod1, zawod2, zawod6, woj, nace, komp_techniczne:komp_biurowe) %>%
+  mutate_at(vars(komp_techniczne:komp_biurowe), as.integer) -> final_data
+```
+
+```{r}
+saveRDS(imputed, "../data/bkl-final.rds")
+```
+
+```{r}
+final_data 
+```
+
+
