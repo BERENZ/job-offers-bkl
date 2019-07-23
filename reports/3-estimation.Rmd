@@ -111,7 +111,7 @@ registerDoFuture()
 plan(multiprocess)
 
 
-res <- foreach(i = 1:50, .export = c("wynik")) %dopar% {
+res_calib <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
   set.seed(i)
   
   totals_kod2 <- subset(totals, subset = b == i)
@@ -157,9 +157,9 @@ res <- foreach(i = 1:50, .export = c("wynik")) %dopar% {
 ```
 
 ```{r}
-res_t <- transpose(res)
+res_calib_t <- transpose(res_calib)
 
-res_t$calib_kod2 %>%
+res_calib_t$calib_kod2 %>%
   bind_rows(.id = "boot") %>%
   gather(komp, vals, komp_techniczne:komp_biurowe) %>%
   arrange(komp, boot) %>%
@@ -170,7 +170,7 @@ res_t$calib_kod2 %>%
             rmse = sd^2 + bias^2,
             cv = sqrt(rmse)/m*100) -> wyn_kod2
 
-res_t$calib_kod2_sek %>%
+res_calib_t$calib_kod2_sek %>%
   bind_rows(.id = "boot") %>%
   gather(komp, vals, komp_techniczne:komp_biurowe) %>%
   arrange(komp, boot) %>%
