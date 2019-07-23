@@ -214,44 +214,85 @@ komps <- c("komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komp
                              "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
                              "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe")
 
-iter <- 1 ## po bootstrapach
-set.seed(iter)
-totals_kod2 <- subset(totals, subset = b == iter)
+res <- foreach(i = 1:50, .export = c("wynik")) %dopar% {
+  
+  set.seed(i)
+  
+  final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+      sample_frac(1, replace = T) %>% ungroup() %>%
+      add_count(rok, name = "m") %>%
+      left_join( totals_kod2 %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      mutate(weight = total / m ) %>%
+      as.data.frame()
 
-final_data_kod2 <- final_data %>%  group_by(rok) %>%  
-  sample_frac(1, replace = T) %>% ungroup() %>%
-  add_count(rok, name = "m") %>%
-  left_join( totals_kod2 %>% count(rok, wt = hat_wolne, name = "total")) %>%
-  mutate(weight = total / m )
+    totals_boot <- totals %>% filter(b == i)
+    X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
 
-totals_boot <- totals %>% filter(b == iter)
-X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
+    wynik_est <- list()
+    wynik_wt <- list()
 
-k <- 1 ## po zmiennych
+    for (k in 1:length(komps)) {
+      
+        m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T)
+        X_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
+        lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
+        t1 <- totals_boot
+        t2 <- totals_boot
+        t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
+        t2$pred <- 0
+        t1$flag <- "1"
+        t2$flag <- "0"
+  
+        totals_cal <- as.data.frame(rbind(t1,t2))
+        totals_cal$wt  <- ifelse(totals_cal$flag  == 1, totals_cal$pred*totals_cal$hat_wolne, totals_cal$hat_wolne)
+        tab_totals <- xtabs(wt~ rok + flag, data = totals_cal)
+        tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
+        final_data_kod2$flag <- as.character(final_data_kod2[,komps[k]])
+        lasso_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
+        cal_lasso_kod2 <- calibrate(design = lasso_kod2, 
+                                    formula = list(~rok + flag), 
+                                    population = list(tab_totals))
+  
+      svyby(formula = as.formula(paste("~", komps[k])), 
+            by = ~ rok, 
+            FUN = svymean, 
+            design = cal_lasso_kod2) %>%
+        select(-se) -> wyn
 
-m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T)
-X_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
-lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
-
-t1 <- totals_boot
-t2 <- totals_boot
-t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
-t2$pred <- 0
-t1[,komps[k]] <- 1
-t2[,komps[k]] <- 0
-t1$hat_wolne <- t1$hat_wolne/2
-t2$hat_wolne <- t2$hat_wolne/2
-totals_cal <- rbind(t1,t2)
-totals_cal <- totals_cal %>% mutate(wt = ifelse(komp_techniczne==1, pred*hat_wolne, hat_wolne*2))
-tab_totals <- xtabs(wt ~ rok + komp_techniczne, data = totals_cal)
-tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
-
-lasso_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
-cal_lasso_kod2 <- calibrate(design = lasso_kod2, 
-                            formula = list(~rok), 
-                            population = list(tab_totals))
+      wynik_est[[k]] <- wyn
+      wynik_wt[[k]] <- weights(cal_lasso_kod2)
+}
 
 
+wynik <- list(wynik_est = bind_cols(wynik_est) %>% select(rok, starts_with("komp")), 
+              wynik_wt = bind_cols(wynik_wt))
+}
+```
+
+```{r}
+res_t <- transpose(res)
+
+res_t$wynik_est %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100) -> wyn_kod2
+
+res_t$calib_kod2_sek %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100) -> wyn_kod2_pkd
 
 ```
 
