@@ -87,6 +87,91 @@ gus_sek %>%
 saveRDS(object = gus_dane, file = "../data/gus-woj-sek.rds")
 ```
 
+
+Data with standard errors
+
+```{r}
+d2011 <- read.table("../data-raw/popyt-2012", header = F, sep  = ";", dec = ",", stringsAsFactors = F) %>%
+  select(sekcja = V1, prec = V3) %>%
+  mutate(rok = 2011)
+
+d2013 <- read_excel("../data-raw/PW_popyt_na_prace_w_2013.xls", col_names = F, skip = 31) %>%
+  na.omit() %>%
+  mutate(sekcja = d2012$sekcja) %>%
+  select(sekcja, prec = 3)%>%
+  mutate(rok = 2013)
+  
+d2014 <- read_excel("../data-raw/popyt_na_prace_2014.xls", col_names = F, skip = 31) %>%
+  na.omit() %>%
+  mutate(sekcja = d2012$sekcja) %>%
+  select(sekcja, prec = 3) %>%
+  mutate(rok = 2014)
+
+precs <- bind_rows(d2011,d2013, d2014)
+```
+
+
+Add bootstrap population data
+
+
+```{r}
+gus_dane %>%
+  filter(is.na(woj))  %>%
+  count(rok, sekcja, wt = wolne) %>%
+  left_join(precs) %>%
+  filter(rok != 2012) %>%
+  na.omit() %>%
+  mutate(sd = n*prec/100) -> pop_data_with_prec
+```
+
+```{r}
+gus_dane %>%
+  filter(is.na(woj), sekcja %in% unique(pop_data_with_prec$sekcja)) %>%
+  count(rok, sekcja, kod2, wt  = wolne) %>%
+  add_count(rok, sekcja, wt = n, name = "total") %>%
+  mutate(p = n / total) -> zawody_sekcje
+```
+
+Bootstraping totals
+
+```{r}
+b <- 1000
+pop_data_with_prec %>%
+  group_by(rok, sekcja) %>%
+  do(b = 1:b,
+     n_hat = round(rnorm(n = b, mean = .$n[[1]], sd = .$sd[[1]]))) %>%
+  unnest() %>%
+  left_join( zawody_sekcje %>% select(rok, sekcja, kod2, p)) %>%
+  mutate(hat_wolne = round(p*n_hat)) -> boot_pop
+
+boot_pop
+```
+
+```
+set.seed(123)
+pop_totals %>%
+  group_by(rok, r, b) %>%
+  do(res = rmultinom(n = 100, size = .$r[[1]], p = .$data[[1]]$p) %>% as.data.frame(),
+     kod2 = .$data[[1]]$kod2,
+     sekcja = .$data[[1]]$sekcja) %>%
+  group_by(rok, b) %>%
+  unnest(kod2, sekcja, res) %>%
+  ungroup() %>%
+  arrange(rok, r, b) %>%
+  gather(b2, wolne, V1:V100) %>%
+  mutate(b2 = gsub("V", "", b2),
+         b2 = as.numeric(b2)) %>%
+  arrange(rok, b, b2) -> pop_totals2
+```
+
+
+```{r}
+saveRDS(boot_pop, file = "../data/gus-woj-sek-boot-totals.rds")
+```
+
+
+
+
 ## BKL Data
 
 ```{r}
@@ -112,4 +197,5 @@ bkl <- readRDS("../data/bkl-oferty.rds") %>%
 ```{r}
 saveRDS(bkl, "../data/bkl-before-imp.rds")
 ```
+
 

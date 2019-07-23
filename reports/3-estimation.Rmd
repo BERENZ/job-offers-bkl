@@ -10,14 +10,28 @@ library(survey)
 library(glmnet)
 library(tidyverse)
 library(xtable)
+library(future)
+library(vcd)
+library(doFuture)
 source("../codes/adalasso-chen-phd.R")
 ```
 
 # Data
 
 ```{r}
+totals <- readRDS("../data/gus-woj-sek-boot-totals.rds") %>%
+  filter(substr(kod2,1,1) != 6) %>%
+  mutate(kod2 = ifelse(kod2 == 95, 96, kod2),
+         kod2 = ifelse(kod2 == 92, 91, kod2),
+         kod2 = ifelse(kod2 == 53, 54, kod2),
+         #kod1 = as.character(kod1),
+         kod2 = as.character(kod2),
+         rok = as.character(rok)) 
+
+head(totals)
+
 final_data <- readRDS("../data/bkl-final.rds") %>%
-  filter(zawod1 != 6) %>%
+  filter(zawod1 != 6, rok!=2012, nace %in% unique(totals$sekcja)) %>%
   mutate(zawod2 = ifelse(zawod2 == 95, 96, zawod2),
          zawod2 = ifelse(zawod2 == 92, 91, zawod2),
          zawod2 = ifelse(zawod2 == 99, 96, zawod2),
@@ -25,29 +39,58 @@ final_data <- readRDS("../data/bkl-final.rds") %>%
          zeros = str_extract(zawod6, "0+$"),
          zeros = str_count(zeros, "0"),
          zeros = ifelse(is.na(zeros), 6, 6-zeros),
-         nace = ifelse(nace %in% c("A", "B", "D", "E"), "ABCE", nace),
          rok = as.character(rok)) %>%
   rename(kod1 = zawod1,
          kod2 = zawod2,
          kod6 = zawod6,
-         sekcja = nace) 
-
-totals <- readRDS("../data/gus-woj-sek.rds") %>%
-  filter(kod1 != 6) %>%
-  mutate(kod2 = ifelse(kod2 == 95, 96, kod2),
-         kod2 = ifelse(kod2 == 92, 91, kod2),
-         kod2 = ifelse(kod2 == 53, 54, kod2),
-         kod1 = as.character(kod1),
-         kod2 = as.character(kod2),
-         sekcja = ifelse(sekcja %in% c("A", "B", "D", "E"), "ABCE", sekcja),
-         rok = as.character(rok)) 
+         sekcja = nace) %>%
+  filter(zeros > 1) 
 ```
+
 
 # Correlations
 
+
 ```{r}
-vcd::assocstats(xtabs(~komp_indywidualne + kod1 + rok, data = final_data, subset = zeros > 1)) %>% map("cramer")
-vcd::assocstats(xtabs(~komp_indywidualne + kod2 + rok, data = final_data, subset = zeros > 1)) %>% map("cramer")
+final_data %>%
+  select(kod2, woj, sekcja, komp_techniczne:komp_biurowe) %>%
+  gather(comps, vals, komp_techniczne:komp_biurowe) -> for_corr
+
+for_corr  %>%
+  count(kod2, comp=comps, vals) %>%
+  group_by(comp) %>%
+  do(occupancy = xtabs(n~vals + kod2, data = .) %>% assocstats(.) %>% .$cramer) %>%
+  unnest() %>%
+  left_join(
+    for_corr  %>%
+  count(sekcja, comp=comps, vals) %>%
+  group_by(comp) %>%
+  do(NACE = xtabs(n~vals + sekcja, data = .) %>% assocstats(.) %>% .$cramer) %>%
+  unnest()) %>%
+  left_join(for_corr  %>%
+  count(woj, comp=comps, vals) %>%
+  group_by(comp) %>%
+  do(Voivodeship = xtabs(n~vals + woj, data = .) %>% assocstats(.) %>% .$cramer) %>%
+  unnest()) %>%
+  mutate(comp = case_when(comp == "komp_kulturalne" ~ "Artistic",
+                            comp == "komp_dyspozycyjne"~ "Availability",
+                            comp == "komp_kognitywne" ~ "Cognitive",
+                            comp == "komp_komputerowe" ~ "Computer",
+                            comp == "komp_interpersonalne" ~ "Interpersonal",
+                            comp == "komp_kierownicze" ~ "Managerial",
+                            comp == "komp_matematyczne" ~ "Mathematical",
+                            comp == "komp_biurowe"~ "Office",
+                            comp == "komp_fizyczne" ~ "Physical",
+                            comp == "komp_indywidualne"~ "Self-organization",
+                            comp =="komp_techniczne"  ~ "Technical")) %>%
+  arrange(comp) %>%
+  xtable(digits = 2) %>%
+  print.xtable(include.rownames = F)
+```
+
+```{r}
+vcd::assocstats(xtabs(~komp_indywidualne + kod1 + rok, data = final_data)) %>% map("cramer")
+vcd::assocstats(xtabs(~komp_indywidualne + kod2 + rok, data = final_data)) %>% map("cramer")
 ```
 
 # Calibration
@@ -61,101 +104,156 @@ vcd::assocstats(xtabs(~komp_indywidualne + kod2 + rok, data = final_data, subset
 des <- svydesign(ids = ~1, data = final_data)
 ```
 
-```{r}
-tot_kod1 <- xtabs(wolne~rok + kod1, data = totals, subset = !is.na(woj))
-tot_woj <- xtabs(wolne~rok +  woj, data = totals, subset = !is.na(woj))
-tot_sekcja <- xtabs(wolne~rok +  sekcja, data = totals, subset = is.na(woj))
-```
-
-
-
-Linear calibration for zawod1 
-```{r}
-cal_kod1 <- calibrate(design = des, formula = list(~rok + kod1), population = list(tot_kod1))
-cal_woj <- calibrate(design = des, formula = list(~rok + woj), population = list(tot_woj))
-cal_sek <- calibrate(design = des, formula = list(~rok + sekcja), population = list(tot_sekcja))
-cal_kod1_sek <- rake(design = des, sample.margins  = list(~rok + sekcja, ~rok + kod1),  
-                     population.margins = list(tot_sekcja,tot_kod1), control = list(maxit = 50))
-summary(weights(cal_kod1))
-summary(weights(cal_woj))
-summary(weights(cal_sek))
-summary(weights(cal_kod1_sek))
-```
-
-```{r}
-svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, cal_kod1) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(cal_kod1 = mean) %>%
-  left_join(
-    svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, cal_woj) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(cal_woj = mean)
-  ) %>%
-  left_join(
-    svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, cal_sek) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(cal_sek = mean)
-  ) %>%
-  left_join(
-    svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, cal_kod1_sek) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(cal_kod1_sek = mean)
-  ) %>% 
-  left_join(
-    svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, des) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(des = mean))
-```
-
-
 ### Calibration based on kod2
 
 ```{r}
-final_data_kod2 <- final_data %>% filter(zeros > 1)
-dim(final_data)
-dim(final_data %>% filter(zeros > 1))
-```
+registerDoFuture()
+plan(multiprocess)
 
-```{r}
-des_kod2 <- svydesign(ids = ~1, data = final_data %>% filter(zeros > 1))
-svytable(~rok + kod2, des_kod2)
-```
-```{r}
-totals_kod2 <- subset(totals, subset = is.na(woj) & rok != 2012)
-tot_kod2 <- xtabs(wolne~rok + kod2, data = totals, subset = !is.na(woj) & rok != 2012)
-tot_sek <- xtabs(wolne~rok + sekcja, data = totals, subset = is.na(woj) & rok != 2012)
-```
 
-```{r}
-cal_kod2 <- calibrate(design = des_kod2, formula = list(~rok + kod2), population = list(tot_kod2))
-cal_kod2_sek <- rake(design = des_kod2, 
+res <- foreach(i = 1:50, .export = c("wynik")) %dopar% {
+  set.seed(i)
+  
+  totals_kod2 <- subset(totals, subset = b == i)
+
+  final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+      sample_frac(1, replace = T) %>% ungroup() %>%
+      add_count(rok, name = "m") %>%
+      left_join( totals_kod2 %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      mutate(weight = total / m )
+  
+  des_kod2 <- svydesign(ids = ~1, weight = ~weight, data = final_data_kod2)
+  
+  tot_kod2 <- xtabs(hat_wolne~rok + kod2, data = totals_kod2)
+  tot_sek <- xtabs(hat_wolne~rok + sekcja, data = totals_kod2)
+  cal_kod2 <- calibrate(design = des_kod2, formula = list(~rok + kod2), 
+                      population = list(tot_kod2))
+  cal_kod2_sek <- rake(design = des_kod2, 
                      sample.margins = list(~rok + kod2, ~rok + sekcja), 
                      population.margins = list(tot_kod2, tot_sek), control = list(maxit = 50))
-summary(weights(cal_kod2))
-summary(weights(cal_kod2_sek))
+  
+  svyby(formula = ~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
+        komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
+        komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, 
+      by = ~ rok, 
+      FUN = svymean, 
+      design = cal_kod2) %>%
+  select(rok, komp_techniczne:komp_biurowe) -> wyn1 
+  
+  svyby(formula = ~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
+        komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
+        komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, 
+      by = ~ rok, 
+      FUN = svymean, 
+      design = cal_kod2_sek) %>%
+  select(rok, komp_techniczne:komp_biurowe) -> wyn2
+  
+  wynik <- list(calib_kod2=wyn1, 
+                calib_kod2_w = weights(cal_kod2),
+                calib_kod2_sek=wyn2,
+                calib_kod2_sek_w = weights(cal_kod2_sek))
+  
+}
+```
+
+```{r}
+res_t <- transpose(res)
+
+res_t$calib_kod2 %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100) -> wyn_kod2
+
+res_t$calib_kod2_sek %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100) -> wyn_kod2_pkd
+
+plot(wyn_kod2$cv,wyn_kod2_pkd$cv)
+abline(a=0,b=1,col='red')
+
+```
+
+```{r}
+res_t$calib_kod2_w %>%
+  map_df(~summary(.) %>% broom::tidy()) %>%
+  summary()
+```
+
+```{r}
+res_t$calib_kod2_sek_w %>%
+  map_df(~summary(.) %>% broom::tidy()) %>%
+  summary()
+```
+
+```{r}
+wyn_kod2 %>%
+  ggplot(data = ., aes(x = rok, y = m, group = komp, 
+                       ymin = m-1.96*sd, ymax = m+1.96*sd)) +
+  geom_errorbar(width = 0.1) +  
+  geom_point(size = 0.4) + 
+  facet_wrap(~komp)
 ```
 
 ### Lasso
+
+```{r}
+komps <- c("komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komputerowe", 
+                             "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
+                             "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe")
+
+iter <- 1 ## po bootstrapach
+set.seed(iter)
+totals_kod2 <- subset(totals, subset = b == iter)
+
+final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+  sample_frac(1, replace = T) %>% ungroup() %>%
+  add_count(rok, name = "m") %>%
+  left_join( totals_kod2 %>% count(rok, wt = hat_wolne, name = "total")) %>%
+  mutate(weight = total / m )
+
+totals_boot <- totals %>% filter(b == iter)
+X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
+
+k <- 1 ## po zmiennych
+
+m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T)
+X_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
+lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
+
+t1 <- totals_boot
+t2 <- totals_boot
+t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
+t2$pred <- 0
+t1[,komps[k]] <- 1
+t2[,komps[k]] <- 0
+t1$hat_wolne <- t1$hat_wolne/2
+t2$hat_wolne <- t2$hat_wolne/2
+totals_cal <- rbind(t1,t2)
+totals_cal <- totals_cal %>% mutate(wt = ifelse(komp_techniczne==1, pred*hat_wolne, hat_wolne*2))
+tab_totals <- xtabs(wt ~ rok + komp_techniczne, data = totals_cal)
+tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
+
+lasso_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
+cal_lasso_kod2 <- calibrate(design = lasso_kod2, 
+                            formula = list(~rok), 
+                            population = list(tab_totals))
+
+
+
+```
 
 ```{r}
 set.seed(123)
@@ -181,7 +279,7 @@ for (i in 1:11) {
   cat(komps[i],'\n')
   ## lasso kod 
   X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
-  m1 <- mycv.glmnet(x = X, y = final_data_kod2[,komps[i]], intercept = T)
+  m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T)
   X_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
   lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
   prob_pred <- exp(lin_pred) / (1+exp(lin_pred))
@@ -191,8 +289,8 @@ for (i in 1:11) {
   
   ## ridge ada kod
   X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
-  m1 <- mycv.glmnet(x = X, y = final_data_kod2[,komps[i]], intercept = T, alpha = 0)
-  m1 <- mycv.glmnet(x = X, y = final_data_kod2[,komps[i]], intercept = T, penalty.factor = 1/abs(m1$coef[-1]))
+  m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, alpha = 0)
+  m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, penalty.factor = 1/abs(m1$coef[-1]))
   X_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
   lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
   prob_pred <- exp(lin_pred) / (1+exp(lin_pred))
@@ -204,7 +302,7 @@ for (i in 1:11) {
   Xkod <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
   Xsek <- Matrix::fac2sparse(final_data_kod2$sekcja) %>% t() 
   X <- cbind(Xkod, Xsek)
-  m2 <- mycv.glmnet(x = X, y = final_data_kod2[,komps[i]], intercept = T)
+  m2 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T)
   Xkod_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
   Xsek_tot <- Matrix::fac2sparse(totals_kod2$sekcja) %>% t() 
   X_tot <- cbind(Xkod_tot, Xsek_tot)
@@ -218,8 +316,8 @@ for (i in 1:11) {
   Xkod <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
   Xsek <- Matrix::fac2sparse(final_data_kod2$sekcja) %>% t() 
   X <- cbind(Xkod, Xsek)
-  m2 <- mycv.glmnet(x = X, y = final_data_kod2[,komps[i]], intercept = T, alpha = 0)
-  m2 <- mycv.glmnet(x = X, y = final_data_kod2[,komps[i]], intercept = T, penalty.factor = 1/abs(m2$coef[-1]))
+  m2 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, alpha = 0)
+  m2 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, penalty.factor = 1/abs(m2$coef[-1]))
   Xkod_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
   Xsek_tot <- Matrix::fac2sparse(totals_kod2$sekcja) %>% t() 
   X_tot <- cbind(Xkod_tot, Xsek_tot)
@@ -241,13 +339,6 @@ svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerow
   rownames_to_column("komp") %>%
   select(-SE) %>%
   rename(cal_kod2 = mean) %>%
-  left_join(svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, cal_kod1) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(cal_kod1 = mean)) %>% 
   left_join(svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
           komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
           komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, des) %>% 

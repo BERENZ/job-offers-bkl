@@ -21,6 +21,7 @@ bkl <- readRDS("../data/bkl-before-imp.rds") %>%
   mutate_at(vars(zrodlo,podregion,branza,forma_ogl), as.character)
 
 bkl %>%
+  filter(rok !=2012) %>%
   skimr::skim()
 ```
 
@@ -102,7 +103,11 @@ saveRDS(final_data, "../data/bkl-final.rds")
 ```
 
 ```{r}
-final_data 
+final_data  %>% 
+  filter(rok != 2012) %>%
+  count(zawod2) %>%
+  filter(zawod2 %in% seq(10,90,10)) %>%
+  summarise(sum(n))
 ```
 
 
@@ -150,5 +155,40 @@ imputed %>%
                             comp =="komp_techniczne"  ~ "Technical"))) %>%
   xtable(digits = 1, caption = "Share of skills included in job offers by data source based on pooled data 2011, 2013 and 2014") %>%
   print.xtable(include.rownames = F, caption.placement = "top")
+```
+
+```{r}
+imputed %>%
+  ungroup() %>%
+  select(zrodlo, komp_techniczne:komp_biurowe) %>%
+  gather(comp, vals, -zrodlo) %>%
+  count(zrodlo, comp, vals) %>%
+  add_count(zrodlo, comp, wt = n, name = "total") %>%
+  mutate(p = n/total*100) %>%
+  filter(vals) %>%
+  select(zrodlo, comp, p) %>%
+  mutate(comp = case_when(comp == "komp_kulturalne" ~ "Artistic",
+                            comp == "komp_dyspozycyjne"~ "Availability",
+                            comp == "komp_kognitywne" ~ "Cognitive",
+                            comp == "komp_komputerowe" ~ "Computer",
+                            comp == "komp_interpersonalne" ~ "Interpersonal",
+                            comp == "komp_kierownicze" ~ "Managerial",
+                            comp == "komp_matematyczne" ~ "Mathematical",
+                            comp == "komp_biurowe"~ "Office",
+                            comp == "komp_fizyczne" ~ "Physical",
+                            comp == "komp_indywidualne"~ "Self-organization",
+                            comp =="komp_techniczne"  ~ "Technical")) %>%
+  spread(zrodlo, p) %>%
+  left_join(imputed %>%
+  ungroup() %>%
+  select(zrodlo, komp_techniczne:komp_biurowe) %>%
+  gather(comp, vals, -zrodlo) %>%
+  count(comp, vals) %>%
+  add_count(comp, wt = n, name = "total") %>%
+  mutate(p = n/total*100) %>%
+  filter(vals) %>%
+  select(comp, p)) %>%
+  select(online=`1`, pup = `2`) %>%
+  cor(m = "s")
 ```
 
