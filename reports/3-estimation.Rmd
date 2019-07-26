@@ -6,6 +6,7 @@ output: html_notebook
 # Packages
 
 ```{r}
+# install.packages("fastglm")
 library(survey)
 library(glmnet)
 library(tidyverse)
@@ -13,6 +14,8 @@ library(xtable)
 library(future)
 library(vcd)
 library(doFuture)
+library(fastglm)
+
 source("../codes/adalasso-chen-phd.R")
 ```
 
@@ -110,7 +113,7 @@ des <- svydesign(ids = ~1, data = final_data)
 registerDoFuture()
 plan(multiprocess)
 
-
+tic <- Sys.time()
 res_calib <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
   set.seed(i)
   
@@ -154,83 +157,124 @@ res_calib <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
                 calib_kod2_sek_w = weights(cal_kod2_sek))
   
 }
+
+Sys.time() - tic
 ```
 
 ```{r}
-res_calib_t <- transpose(res_calib)
-
-res_calib_t$calib_kod2 %>%
-  bind_rows(.id = "boot") %>%
-  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
-  arrange(komp, boot) %>%
-  group_by(komp, rok) %>%
-  summarise(m = mean(vals),
-            bias = mean(vals - mean(vals)),
-            sd = sd(vals),
-            rmse = sd^2 + bias^2,
-            cv = sqrt(rmse)/m*100) -> wyn_kod2
-
-res_calib_t$calib_kod2_sek %>%
-  bind_rows(.id = "boot") %>%
-  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
-  arrange(komp, boot) %>%
-  group_by(komp, rok) %>%
-  summarise(m = mean(vals),
-            bias = mean(vals - mean(vals)),
-            sd = sd(vals),
-            rmse = sd^2 + bias^2,
-            cv = sqrt(rmse)/m*100) -> wyn_kod2_pkd
-
-plot(wyn_kod2$cv,wyn_kod2_pkd$cv)
-abline(a=0,b=1,col='red')
-
+saveRDS(res_calib, file = "../results/res_calib.rds")
 ```
 
-```{r}
-res_t$calib_kod2_w %>%
-  map_df(~summary(.) %>% broom::tidy()) %>%
-  summary()
-```
 
-```{r}
-res_t$calib_kod2_sek_w %>%
-  map_df(~summary(.) %>% broom::tidy()) %>%
-  summary()
-```
-
-```{r}
-wyn_kod2 %>%
-  ggplot(data = ., aes(x = rok, y = m, group = komp, 
-                       ymin = m-1.96*sd, ymax = m+1.96*sd)) +
-  geom_errorbar(width = 0.1) +  
-  geom_point(size = 0.4) + 
-  facet_wrap(~komp)
-```
-
-### Lasso
+### Model-calibration - GLM
 
 ```{r}
 komps <- c("komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komputerowe", 
                              "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
                              "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe")
 
-res <- foreach(i = 1:50, .export = c("wynik")) %dopar% {
-  
+tic <- Sys.time()
+res_glm_kod2 <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
+
   set.seed(i)
+  
+  totals_boot <- totals %>% filter(b == i)
   
   final_data_kod2 <- final_data %>%  group_by(rok) %>%  
       sample_frac(1, replace = T) %>% ungroup() %>%
       add_count(rok, name = "m") %>%
-      left_join( totals_kod2 %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      left_join( totals_boot %>% count(rok, wt = hat_wolne, name = "total")) %>%
       mutate(weight = total / m ) %>%
       as.data.frame()
 
-    totals_boot <- totals %>% filter(b == i)
     X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
 
     wynik_est <- list()
     wynik_wt <- list()
+    wynik_model <- list()
+    for (k in 1:length(komps)) {
+      
+        m1 <- fastglm(x = as.matrix(cbind(1,X[,-1])), y = as.matrix(final_data_kod2[,komps[k]]), 
+                      family = binomial(), method = 2)
+  
+        X_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
+        lin_pred  <- as.numeric(cbind(1, X_tot[,-1]) %*% m1$coefficients)
+        t1 <- totals_boot
+        t2 <- totals_boot
+        t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
+        t2$pred <- 0
+        t1$flag <- "1"
+        t2$flag <- "0"
+  
+        totals_cal <- as.data.frame(rbind(t1,t2))
+        totals_cal$wt  <- ifelse(totals_cal$flag  == 1, totals_cal$pred*totals_cal$hat_wolne, totals_cal$hat_wolne)
+        tab_totals <- xtabs(wt~ rok + flag, data = totals_cal)
+        tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
+        final_data_kod2$flag <- as.character(final_data_kod2[,komps[k]])
+        glm_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
+        cal_glm_kod2 <- calibrate(design = glm_kod2, 
+                                    formula = list(~rok + flag), 
+                                    population = list(tab_totals))
+  
+      svyby(formula = as.formula(paste("~", komps[k])), 
+            by = ~ rok, 
+            FUN = svymean, 
+            design = cal_glm_kod2) %>%
+        dplyr::select(-se) -> wyn
 
+      wynik_est[[k]] <- wyn
+      wynik_wt[[k]] <- weights(cal_glm_kod2)
+      wynik_model[[k]] <- m1
+}
+
+
+wynik <- list(wynik_est = bind_cols(wynik_est) %>% select(rok, starts_with("komp")), 
+              wynik_wt = bind_cols(wynik_wt),
+              wynik_model = wynik_model)
+
+
+}
+
+toc <- Sys.time() - tic
+toc
+```
+
+```{r}
+saveRDS(res_glm_kod2, file = "../results/res_glm_kod2.rds")
+```
+
+
+### Lasso
+
+
+Kalibracja wg kod2 + nace
+
+```{r}
+registerDoFuture()
+plan(multiprocess)
+tic <- Sys.time()
+komps <- c("komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komputerowe", 
+                             "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
+                             "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe")
+
+res_lasso_kod2 <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
+  
+  set.seed(i)
+  
+  totals_boot <- totals %>% filter(b == i)
+  
+  final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+      sample_frac(1, replace = T) %>% ungroup() %>%
+      add_count(rok, name = "m") %>%
+      left_join( totals_boot %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      mutate(weight = total / m ) %>%
+      as.data.frame()
+
+    X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
+
+    wynik_est <- list()
+    wynik_wt <- list()
+    wynik_model <- list()
     for (k in 1:length(komps)) {
       
         m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T)
@@ -261,266 +305,256 @@ res <- foreach(i = 1:50, .export = c("wynik")) %dopar% {
 
       wynik_est[[k]] <- wyn
       wynik_wt[[k]] <- weights(cal_lasso_kod2)
+      wynik_model[[k]] <- m1
 }
 
 
 wynik <- list(wynik_est = bind_cols(wynik_est) %>% select(rok, starts_with("komp")), 
-              wynik_wt = bind_cols(wynik_wt))
+              wynik_wt = bind_cols(wynik_wt),
+              wynik_model = wynik_model)
+
+
 }
+
+toc <- Sys.time() - tic
+toc
 ```
 
 ```{r}
-res_t <- transpose(res)
+saveRDS(res_lasso_kod2, file = "../results/res_lasso_kod2.rds")
+```
 
-res_t$wynik_est %>%
-  bind_rows(.id = "boot") %>%
-  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
-  arrange(komp, boot) %>%
-  group_by(komp, rok) %>%
-  summarise(m = mean(vals),
-            bias = mean(vals - mean(vals)),
-            sd = sd(vals),
-            rmse = sd^2 + bias^2,
-            cv = sqrt(rmse)/m*100) -> wyn_kod2
 
-res_t$calib_kod2_sek %>%
-  bind_rows(.id = "boot") %>%
-  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
-  arrange(komp, boot) %>%
-  group_by(komp, rok) %>%
-  summarise(m = mean(vals),
-            bias = mean(vals - mean(vals)),
-            sd = sd(vals),
-            rmse = sd^2 + bias^2,
-            cv = sqrt(rmse)/m*100) -> wyn_kod2_pkd
+Kalibracja wg kod2 + nace
 
+
+```{r}
+tic <- Sys.time()
+res_lasso_kod2_nace <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
+  
+  set.seed(i)
+  
+  totals_boot <- totals %>% filter(b == i)
+  
+  final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+      sample_frac(1, replace = T) %>% ungroup() %>%
+      add_count(rok, name = "m") %>%
+      left_join( totals_boot %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      mutate(weight = total / m ) %>%
+      as.data.frame()
+
+    
+    Xkod <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
+    Xsek <- Matrix::fac2sparse(final_data_kod2$sekcja) %>% t() 
+    X <- cbind(Xkod, Xsek) 
+
+    wynik_est <- list()
+    wynik_wt <- list()
+    wynik_model <- list()
+    for (k in 1:length(komps)) {
+      
+        m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T)
+        Xkod_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
+        Xsek_tot <- Matrix::fac2sparse(totals_boot$sekcja) %>% t() 
+        X_tot <- cbind(Xkod_tot, Xsek_tot)
+        lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
+        t1 <- totals_boot
+        t2 <- totals_boot
+        t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
+        t2$pred <- 0
+        t1$flag <- "1"
+        t2$flag <- "0"
+  
+        totals_cal <- as.data.frame(rbind(t1,t2))
+        totals_cal$wt  <- ifelse(totals_cal$flag  == 1, totals_cal$pred*totals_cal$hat_wolne, totals_cal$hat_wolne)
+        tab_totals <- xtabs(wt~ rok + flag, data = totals_cal)
+        tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
+        final_data_kod2$flag <- as.character(final_data_kod2[,komps[k]])
+        lasso_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
+        cal_lasso_kod2 <- calibrate(design = lasso_kod2, 
+                                    formula = list(~rok + flag), 
+                                    population = list(tab_totals))
+  
+      svyby(formula = as.formula(paste("~", komps[k])), 
+            by = ~ rok, 
+            FUN = svymean, 
+            design = cal_lasso_kod2) %>%
+        select(-se) -> wyn
+
+      wynik_est[[k]] <- wyn
+      wynik_wt[[k]] <- weights(cal_lasso_kod2)
+      wynik_model[[k]] <- m1
+}
+
+
+wynik <- list(wynik_est = bind_cols(wynik_est) %>% select(rok, starts_with("komp")), 
+              wynik_wt = bind_cols(wynik_wt),
+              wynik_model = wynik_model)
+}
+toc <- Sys.time() - tic
+toc
 ```
 
 ```{r}
-set.seed(123)
-lasso_kod2 <- numeric(11)  
-lasso_kod2_pkd <- numeric(11)
-ada_kod2 <- numeric(11)  
-ada_kod2_pkd <- numeric(11)
+saveRDS(res_lasso_kod2_nace, file = "../results/res_lasso_kod2_nace.rds")
+```
 
-lasso_kod2_model <- list()
-lasso_kod2_pkd_model <- list()
-ada_kod2_model <- list()
-ada_kod2_pkd_model <- list()
+### Adaptive lasso
 
-lasso_kod2_model_est <- list()
-lasso_kod2_pkd_model_est <- list()
-ada_kod2_model_est <- list()
-ada_kod2_pkd_model_est <- list()
 
+```{r}
+registerDoFuture()
+plan(multiprocess)
+```
+
+```{r}
+
+tic <- Sys.time()
 komps <- c("komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komputerowe", 
                              "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
                              "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe")
-for (i in 1:11) {
-  cat(komps[i],'\n')
-  ## lasso kod 
-  X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
-  m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T)
-  X_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
-  lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
-  prob_pred <- exp(lin_pred) / (1+exp(lin_pred))
-  lasso_kod2[i] <- weighted.mean(prob_pred, totals_kod2$wolne)
-  lasso_kod2_model[[i]] <- m1
-  lasso_kod2_model_est[[i]] <- prob_pred
+
+res_alasso_kod2 <- foreach(i = 1:10, .export = c("wynik"), .verbose = TRUE) %dopar% {
   
-  ## ridge ada kod
-  X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
-  m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, alpha = 0)
-  m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, penalty.factor = 1/abs(m1$coef[-1]))
-  X_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
-  lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
-  prob_pred <- exp(lin_pred) / (1+exp(lin_pred))
-  ada_kod2[i] <- weighted.mean(prob_pred, totals_kod2$wolne)
-  ada_kod2_model[[i]] <- m1
-  ada_kod2_model_est[[i]] <- prob_pred
+  set.seed(i)
   
-  ## lasso kod i pkd
-  Xkod <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
-  Xsek <- Matrix::fac2sparse(final_data_kod2$sekcja) %>% t() 
-  X <- cbind(Xkod, Xsek)
-  m2 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T)
-  Xkod_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
-  Xsek_tot <- Matrix::fac2sparse(totals_kod2$sekcja) %>% t() 
-  X_tot <- cbind(Xkod_tot, Xsek_tot)
-  lin_pred  <- as.numeric(cbind(1, X_tot) %*% m2$coef)
-  prob_pred <- exp(lin_pred) / (1+exp(lin_pred))
-  lasso_kod2_pkd[i] <- weighted.mean(prob_pred, totals_kod2$wolne)
-  lasso_kod2_pkd_model[[i]] <- m2
-  lasso_kod2_pkd_model_est[[i]] <- prob_pred
+  totals_boot <- totals %>% filter(b == i)
   
-  ## ridge ada kod i pkd
-  Xkod <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
-  Xsek <- Matrix::fac2sparse(final_data_kod2$sekcja) %>% t() 
-  X <- cbind(Xkod, Xsek)
-  m2 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, alpha = 0)
-  m2 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[i]]), intercept = T, penalty.factor = 1/abs(m2$coef[-1]))
-  Xkod_tot <- Matrix::fac2sparse(totals_kod2$kod2) %>% t() 
-  Xsek_tot <- Matrix::fac2sparse(totals_kod2$sekcja) %>% t() 
-  X_tot <- cbind(Xkod_tot, Xsek_tot)
-  lin_pred  <- as.numeric(cbind(1, X_tot) %*% m2$coef)
-  prob_pred <- exp(lin_pred) / (1+exp(lin_pred))
-  ada_kod2_pkd[i] <- weighted.mean(prob_pred, totals_kod2$wolne)
-  ada_kod2_pkd_model[[i]] <- m2
-  ada_kod2_pkd_model_est[[i]] <- prob_pred
+  final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+      sample_frac(1, replace = T) %>% ungroup() %>%
+      add_count(rok, name = "m") %>%
+      left_join( totals_boot %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      mutate(weight = total / m ) %>%
+      as.data.frame()
+
+    X <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
+
+    wynik_est <- list()
+    wynik_wt <- list()
+    wynik_model <- list()
+    for (k in 1:length(komps)) {
+      
+        m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T, alpha = 0)
+        m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T, penalty.factor = 1/abs(m1$coef[-1]))
+        X_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
+        lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
+        t1 <- totals_boot
+        t2 <- totals_boot
+        t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
+        t2$pred <- 0
+        t1$flag <- "1"
+        t2$flag <- "0"
+  
+        totals_cal <- as.data.frame(rbind(t1,t2))
+        totals_cal$wt  <- ifelse(totals_cal$flag  == 1, totals_cal$pred*totals_cal$hat_wolne, totals_cal$hat_wolne)
+        tab_totals <- xtabs(wt~ rok + flag, data = totals_cal)
+        tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
+        final_data_kod2$flag <- as.character(final_data_kod2[,komps[k]])
+        lasso_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
+        cal_lasso_kod2 <- calibrate(design = lasso_kod2, 
+                                    formula = list(~rok + flag), 
+                                    population = list(tab_totals))
+  
+      svyby(formula = as.formula(paste("~", komps[k])), 
+            by = ~ rok, 
+            FUN = svymean, 
+            design = cal_lasso_kod2) %>%
+        select(-se) -> wyn
+
+      wynik_est[[k]] <- wyn
+      wynik_wt[[k]] <- weights(cal_lasso_kod2)
+      wynik_model[[k]] <- m1
 }
 
 
-```
+wynik <- list(wynik_est = bind_cols(wynik_est), 
+              wynik_wt = bind_cols(wynik_wt),
+              wynik_model = wynik_model)
 
-```{r}
-svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, cal_kod2) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(cal_kod2 = mean) %>%
-  left_join(svymean(~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-          komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-          komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, des) %>% 
-  as.data.frame() %>%
-  rownames_to_column("komp") %>%
-  select(-SE) %>%
-  rename(des = mean)) %>%
-  mutate(lasso_kod2 = lasso_kod2,
-         lasso_kod2_pkd = lasso_kod2_pkd,
-         ada_kod2 = ada_kod2,
-         ada_kod2_pkd = ada_kod2_pkd) %>%
-  select(comp = komp, naive = des, calib = cal_kod2, lasso1 = lasso_kod2, 
-         lasso2 = lasso_kod2_pkd, alasso1 = ada_kod2, alasso2=ada_kod2_pkd) %>%
-  mutate_at(vars(naive:alasso2), list(~.*100)) %>%
-  mutate(comp = case_when(comp == "komp_kulturalne" ~ "Artistic",
-comp == "komp_dyspozycyjne"~ "Availability",
-comp == "komp_kognitywne" ~ "Cognitive",
-comp == "komp_komputerowe" ~ "Computer",
-comp == "komp_interpersonalne" ~ "Interpersonal",
-comp == "komp_kierownicze" ~ "Managerial",
-comp == "komp_matematyczne" ~ "Mathematical",
-comp == "komp_biurowe"~ "Office",
-comp == "komp_fizyczne" ~ "Physical",
-comp == "komp_indywidualne"~ "Self-organization",
-comp =="komp_techniczne"  ~ "Technical")) %>%
-  xtable(digits = 1, caption = "Results")  %>%
-  print.xtable(include.rownames = F, caption.placement = "top")
 
-``` 
-
-```{r}
-auc_stats <- list()
-for (i in 1:11) {
-  cat("=====",komps[i], "=====\n")
-  auc_stats[[i]] <- c(max(lasso_kod2_model[[i]]$metrics[lasso_kod2_model[[i]]$best.metric.index,]),
-  max(lasso_kod2_pkd_model[[i]]$metrics[lasso_kod2_pkd_model[[i]]$best.metric.index,]),
-  max(ada_kod2_model[[i]]$metrics[ada_kod2_model[[i]]$best.metric.index,]),
-  max(ada_kod2_pkd_model[[i]]$metrics[ada_kod2_pkd_model[[i]]$best.metric.index,]))
 }
 
-do.call("rbind", auc_stats) %>%
-  as.data.frame() %>%
-  set_names(c("AdaLasso1", "AdaLasso2", "Lasso1", "Lasso2")) %>%
-  mutate(comp = komps) %>%
-  mutate(comp = case_when(comp == "komp_kulturalne" ~ "Artistic",
-                            comp == "komp_dyspozycyjne"~ "Availability",
-                            comp == "komp_kognitywne" ~ "Cognitive",
-                            comp == "komp_komputerowe" ~ "Computer",
-                            comp == "komp_interpersonalne" ~ "Interpersonal",
-                            comp == "komp_kierownicze" ~ "Managerial",
-                            comp == "komp_matematyczne" ~ "Mathematical",
-                            comp == "komp_biurowe"~ "Office",
-                            comp == "komp_fizyczne" ~ "Physical",
-                            comp == "komp_indywidualne"~ "Self-organization",
-                            comp =="komp_techniczne"  ~ "Technical")) %>%
-  select(comp, Lasso1, Lasso2, AdaLasso1, AdaLasso2) %>%
-  arrange(comp) %>%
-  xtable(digits = 3, caption = "Quality of the model measured bu Area Under Curve (AUC)") %>%
-  print.xtable(include.rownames = F, caption.placement = "top")
+toc <- Sys.time() - tic
+toc
 ```
 
 ```{r}
-svyby(formula = ~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-        komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-        komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, 
-      by = ~ rok, 
-      FUN = svymean, 
-      design = cal_kod2) %>%
-  select(rok, komp_techniczne:komp_biurowe) %>%
-  mutate(est = "Lin Calib") %>%
-  bind_rows(svyby(formula = ~komp_techniczne + komp_matematyczne + komp_kulturalne + komp_komputerowe + 
-        komp_kognitywne + komp_kierownicze + komp_interpersonalne + 
-        komp_indywidualne + komp_fizyczne + komp_dyspozycyjne + komp_biurowe, 
-      by = ~ rok, 
-      FUN = svymean, 
-      design = des) %>%
-  select(rok, komp_techniczne:komp_biurowe) %>%
-  mutate(est = "des"))  %>% 
-  bind_rows(
-    lasso_kod2_model_est %>% 
-      bind_cols() %>%
-      set_names(komps) %>%
-      bind_cols(totals_kod2) %>%
-      group_by(rok) %>%
-      summarise_at(vars(komp_techniczne:komp_biurowe), list(~weighted.mean(., wolne))) %>%
-      mutate(est = "Lasso1")
-  ) %>%
-  bind_rows(
-    lasso_kod2_pkd_model_est %>% 
-      bind_cols() %>%
-      set_names(komps) %>%
-      bind_cols(totals_kod2) %>%
-      group_by(rok) %>%
-      summarise_at(vars(komp_techniczne:komp_biurowe), list(~weighted.mean(., wolne))) %>%
-      mutate(est = "Lasso2")
-  ) %>%
-  bind_rows(
-    ada_kod2_model_est %>% 
-      bind_cols() %>%
-      set_names(komps) %>%
-      bind_cols(totals_kod2) %>%
-      group_by(rok) %>%
-      summarise_at(vars(komp_techniczne:komp_biurowe), list(~weighted.mean(., wolne))) %>%
-      mutate(est = "Alasso1")
-  ) %>%
-  bind_rows(
-    ada_kod2_pkd_model_est %>% 
-      bind_cols() %>%
-      set_names(komps) %>%
-      bind_cols(totals_kod2) %>%
-      group_by(rok) %>%
-      summarise_at(vars(komp_techniczne:komp_biurowe), list(~weighted.mean(., wolne))) %>%
-      mutate(est = "Alasso2")
-  ) %>%
-  filter(rok %in% c(2011, 2013, 2014)) %>%
-  gather(comp, vals, -rok, -est) %>%
-    mutate(comp = case_when(comp == "komp_kulturalne" ~ "Artistic",
-                            comp == "komp_dyspozycyjne"~ "Availability",
-                            comp == "komp_kognitywne" ~ "Cognitive",
-                            comp == "komp_komputerowe" ~ "Computer",
-                            comp == "komp_interpersonalne" ~ "Interpersonal",
-                            comp == "komp_kierownicze" ~ "Managerial",
-                            comp == "komp_matematyczne" ~ "Mathematical",
-                            comp == "komp_biurowe"~ "Office",
-                            comp == "komp_fizyczne" ~ "Physical",
-                            comp == "komp_indywidualne"~ "Self-organization",
-                            comp =="komp_techniczne"  ~ "Technical"))  %>%
-  spread(est, vals) %>%
-  gather(est, vals, -rok, -comp, -des) %>%
-  mutate(diff = vals - des) %>%
-  ggplot(data = ., aes(x = rok, y = diff, group = est, color = est)) + 
-  geom_point() +
-  geom_line() + 
-  geom_hline(yintercept = 0, col = "black", linetype = "dashed") + 
-  facet_wrap(~comp) +
-  scale_y_continuous() +
-  scale_color_brewer(name = "Estimator", type = "qual", palette = "Dark2")  +
-  theme_bw() +
-  labs(x = "Year (BKL wave)", y = "Percentage point differences (Estimator - Naive)") -> p1
-
-ggsave(filename = "../results/fig-ppdiffs.png", plot = p1, width = 9)
+saveRDS(res_alasso_kod2, file = "../results/res_alasso_kod2.rds")
 ```
 
 
+
+Kalibracja wg kod2 + nace
+
+
+```{r}
+tic <- Sys.time()
+res_alasso_kod2_nace <- foreach(i = 1:500, .export = c("wynik")) %dopar% {
+  
+  set.seed(i)
+  
+  totals_boot <- totals %>% filter(b == i)
+  
+  final_data_kod2 <- final_data %>%  group_by(rok) %>%  
+      sample_frac(1, replace = T) %>% ungroup() %>%
+      add_count(rok, name = "m") %>%
+      left_join( totals_boot %>% count(rok, wt = hat_wolne, name = "total")) %>%
+      mutate(weight = total / m ) %>%
+      as.data.frame()
+
+    
+    Xkod <- Matrix::fac2sparse(final_data_kod2$kod2) %>% t() 
+    Xsek <- Matrix::fac2sparse(final_data_kod2$sekcja) %>% t() 
+    X <- cbind(Xkod, Xsek) 
+
+    wynik_est <- list()
+    wynik_wt <- list()
+    wynik_model <- list()
+    for (k in 1:length(komps)) {
+      
+        m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T, alpha = 0)
+        m1 <- mycv.glmnet(x = X, y = as.matrix(final_data_kod2[,komps[k]]), intercept = T, penalty.factor = 1/abs(m1$coef[-1]))
+        Xkod_tot <- Matrix::fac2sparse(totals_boot$kod2) %>% t() 
+        Xsek_tot <- Matrix::fac2sparse(totals_boot$sekcja) %>% t() 
+        X_tot <- cbind(Xkod_tot, Xsek_tot)
+        lin_pred  <- as.numeric(cbind(1, X_tot) %*% m1$coef)
+        t1 <- totals_boot
+        t2 <- totals_boot
+        t1$pred <- exp(lin_pred) / (1 + exp(lin_pred))
+        t2$pred <- 0
+        t1$flag <- "1"
+        t2$flag <- "0"
+  
+        totals_cal <- as.data.frame(rbind(t1,t2))
+        totals_cal$wt  <- ifelse(totals_cal$flag  == 1, totals_cal$pred*totals_cal$hat_wolne, totals_cal$hat_wolne)
+        tab_totals <- xtabs(wt~ rok + flag, data = totals_cal)
+        tab_totals[,1] <- tab_totals[,1] - tab_totals[,2]
+        final_data_kod2$flag <- as.character(final_data_kod2[,komps[k]])
+        lasso_kod2 <- svydesign(ids = ~1, weight = ~ weight, data = final_data_kod2)
+        cal_lasso_kod2 <- calibrate(design = lasso_kod2, 
+                                    formula = list(~rok + flag), 
+                                    population = list(tab_totals))
+  
+      svyby(formula = as.formula(paste("~", komps[k])), 
+            by = ~ rok, 
+            FUN = svymean, 
+            design = cal_lasso_kod2) %>%
+        select(-se) -> wyn
+
+      wynik_est[[k]] <- wyn
+      wynik_wt[[k]] <- weights(cal_lasso_kod2)
+      wynik_model[[k]] <- m1
+}
+
+
+wynik <- list(wynik_est = bind_cols(wynik_est), 
+              wynik_wt = bind_cols(wynik_wt),
+              wynik_model = wynik_model)
+}
+toc <- Sys.time() - tic
+toc
+```
+
+```{r}
+saveRDS(res_alasso_kod2_nace, file = "../results/res_alasso_kod2_nace.rds")
+```

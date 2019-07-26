@@ -91,19 +91,19 @@ saveRDS(object = gus_dane, file = "../data/gus-woj-sek.rds")
 Data with standard errors
 
 ```{r}
-d2011 <- read.table("../data-raw/popyt-2012", header = F, sep  = ";", dec = ",", stringsAsFactors = F) %>%
+d2011 <- read.table("../data-raw/popyt-2011", header = F, sep  = ";", dec = ",", stringsAsFactors = F) %>%
   select(sekcja = V1, prec = V3) %>%
   mutate(rok = 2011)
 
 d2013 <- read_excel("../data-raw/PW_popyt_na_prace_w_2013.xls", col_names = F, skip = 31) %>%
   na.omit() %>%
-  mutate(sekcja = d2012$sekcja) %>%
+  mutate(sekcja = d2011$sekcja) %>%
   select(sekcja, prec = 3)%>%
   mutate(rok = 2013)
   
 d2014 <- read_excel("../data-raw/popyt_na_prace_2014.xls", col_names = F, skip = 31) %>%
   na.omit() %>%
-  mutate(sekcja = d2012$sekcja) %>%
+  mutate(sekcja = d2011$sekcja) %>%
   select(sekcja, prec = 3) %>%
   mutate(rok = 2014)
 
@@ -169,6 +169,17 @@ pop_totals %>%
 saveRDS(boot_pop, file = "../data/gus-woj-sek-boot-totals.rds")
 ```
 
+```{r}
+boot_pop <- readRDS( "../data/gus-woj-sek-boot-totals.rds")
+
+boot_pop %>%
+  group_by(rok, b, kod1 = substr(kod2, 1,1)) %>%
+  summarise(N = sum(p*hat_wolne)) %>%
+  group_by(rok, kod1) %>%
+  summarise(cv = sd(N)/mean(N)*100) %>%
+  group_by(kod1) %>%
+  summarise(cv = mean(cv))
+```
 
 
 

@@ -1,0 +1,373 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Packages
+
+```{r}
+library(tidyverse)
+library(xtable)
+library(readxl)
+```
+
+
+# variances
+
+```{r}
+d2011 <- read.table("../data-raw/popyt-2011", header = F, sep  = ";", dec = ",", stringsAsFactors = F) %>%
+  select(sekcja = V1, prec = V3) %>%
+  mutate(rok = 2011)
+
+d2013 <- read_excel("../data-raw/PW_popyt_na_prace_w_2013.xls", col_names = F, skip = 31) %>%
+  na.omit() %>%
+  mutate(sekcja = d2011$sekcja) %>%
+  select(sekcja, prec = 3)%>%
+  mutate(rok = 2013)
+  
+d2014 <- read_excel("../data-raw/popyt_na_prace_2014.xls", col_names = F, skip = 31) %>%
+  na.omit() %>%
+  mutate(sekcja = d2011$sekcja) %>%
+  select(sekcja, prec = 3) %>%
+  mutate(rok = 2014)
+
+precs <- bind_rows(d2011,d2013, d2014)
+
+precs %>% 
+  spread(rok, prec) %>%
+  add_row(sekcja = "overall", `2011` = 3.40, `2013` = 4.01, `2014` = 3.98, .before = 1) %>%
+  xtable(caption = "Estimates on relative standard erros of estimators for vacancies of the demand for labour in IV quarter 2011, 2013 and 2014",
+         label = "tab-rel-var") %>%
+  print.xtable(include.rownames = F,
+               caption.placement = "top")
+```
+
+Read the data
+
+```{r}
+res_calib <- readRDS(file = "../results/res_calib.rds")
+res_lasso1 <- readRDS(file = "../results/res_lasso_kod2.rds")
+res_lasso2 <- readRDS(file = "../results/res_lasso_kod2_nace.rds")
+res_alasso1 <- readRDS(file = "../results/res_alasso_kod2.rds")
+#res_cmcgreg1 <- readRDS(file = "../results/res_glm_kod2.rds")
+```
+
+```{r}
+
+
+totals <- readRDS("../data/gus-woj-sek-boot-totals.rds") %>%
+  filter(substr(kod2,1,1) != 6) %>%
+  mutate(kod2 = ifelse(kod2 == 95, 96, kod2),
+         kod2 = ifelse(kod2 == 92, 91, kod2),
+         kod2 = ifelse(kod2 == 53, 54, kod2),
+         #kod1 = as.character(kod1),
+         kod2 = as.character(kod2),
+         rok = as.character(rok)) 
+
+final_data <- readRDS("../data/bkl-final.rds") %>%
+  filter(zawod1 != 6, rok!=2012, nace %in% unique(totals$sekcja)) %>%
+  mutate(zawod2 = ifelse(zawod2 == 95, 96, zawod2),
+         zawod2 = ifelse(zawod2 == 92, 91, zawod2),
+         zawod2 = ifelse(zawod2 == 99, 96, zawod2),
+         zawod2 = ifelse(zawod2 == 53, 54, zawod2),
+         zeros = str_extract(zawod6, "0+$"),
+         zeros = str_count(zeros, "0"),
+         zeros = ifelse(is.na(zeros), 6, 6-zeros),
+         rok = as.character(rok)) %>%
+  rename(kod1 = zawod1,
+         kod2 = zawod2,
+         kod6 = zawod6,
+         sekcja = nace) %>%
+  filter(zeros > 1) 
+
+```
+
+
+```{r}
+totals %>%
+  count(b, rok, kod2, wt = hat_wolne) %>%
+  add_count(b, rok, wt = n, name = "total") %>%
+  mutate(p = n / total*100) %>%
+  group_by(kod2) %>%
+  summarise(pop = mean(p)) %>%
+  left_join(
+    final_data %>%
+      count(rok, kod2) %>%
+      add_count(rok, wt = n, name = "total") %>%
+      mutate(p = n / total*100) %>%
+      group_by(kod2) %>%
+      summarise(bkl = mean(p))
+  )  %>%
+  xtable(digits = 2,
+         caption = "Distribution of occupancy (2 digit codes) in Population and BKL data (average over 2011, 2013 and 2014)") %>%
+  print.xtable(caption.placement = "top", include.rownames = F)
+```
+
+
+```{r}
+totals %>%
+  group_by(rok, b, kod2) %>%
+  summarise(N = sum(p*hat_wolne)) %>%
+  group_by(rok, kod2) %>%
+  summarise(cv = sd(N)/mean(N)*100,
+            m = mean(N)) %>%
+  group_by(rok) %>%
+  do(m = broom::tidy(summary(.$cv))) %>%
+  unnest() %>%
+  xtable(caption = "Estimates on relative standard erros of estimators for vacancies by 
+         occupation (2 digit code) in IV quarter 2011, 2013 and 2014", 
+         label = "tab-occup-var") %>%
+  print.xtable(caption.placement = "top",
+               include.rownames = F)
+
+totals %>%
+  group_by(rok, b, kod2) %>%
+  summarise(N = sum(p*hat_wolne)) %>%
+  group_by(rok, kod2) %>%
+  summarise(cv = sd(N)/mean(N)*100,
+            m = mean(N)) %>%
+  group_by(kod2) %>%
+  summarise(cv = mean(cv)) %>%
+  xtable()
+```
+
+Change format of the data
+
+```{r}
+res_calib_t <- transpose(res_calib)
+res_lasso1_t <- transpose(res_lasso1)
+res_lasso2_t <- transpose(res_lasso2)
+res_alasso1_t <- transpose(res_alasso1)
+res_cmcgreg1_t <- transpose(res_cmcgreg1)
+
+res_cmcgreg1_t <- readRDS("../results/res_cmcgreg1_wynik_est.rds")
+```
+
+```{r}
+res_calib_t$calib_kod2 %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100,
+            q025 = quantile(vals,0.025),
+            q975 = quantile(vals,0.975),
+            estim = "greg") -> wyn_calib_kod2
+
+
+res_lasso1_t$wynik_est %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>% 
+  mutate(vals = as.numeric(vals)) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100,
+            q025 = quantile(vals,0.025),
+            q975 = quantile(vals,0.975),
+            estim = "lasso1") -> wyn_lasso1_kod2
+
+
+res_lasso2_t$wynik_est %>%
+  bind_rows(.id = "boot") %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100,
+            q025 = quantile(vals,0.025),
+            q975 = quantile(vals,0.975),
+            estim = "lasso2") -> wyn_lasso2_kod2
+
+res_alasso1_t$wynik_est %>%
+  bind_rows(.id = "boot") %>%
+  select(boot, rok, starts_with("komp")) %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100,
+            q025 = quantile(vals,0.025),
+            q975 = quantile(vals,0.975),
+            estim = "alasso1") -> wyn_alasso1_kod2
+
+res_cmcgreg1_t %>%
+  bind_rows(.id = "boot") %>%
+  select(boot, rok, starts_with("komp")) %>%
+  gather(komp, vals, komp_techniczne:komp_biurowe) %>%
+  arrange(komp, boot) %>%
+  group_by(komp, rok) %>%
+  summarise(m = mean(vals),
+            bias = mean(vals - mean(vals)),
+            sd = sd(vals),
+            rmse = sd^2 + bias^2,
+            cv = sqrt(rmse)/m*100,
+            q025 = quantile(vals,0.025),
+            q975 = quantile(vals,0.975),
+            estim = "ecmc") -> wyn_ecmc_kod2
+
+final_data %>%
+  select(rok, komp_techniczne:komp_biurowe) %>%
+  gather(komp, val, -rok) %>%
+  group_by(rok,komp) %>%
+  summarise(m = mean(val),
+            estim = "naive") -> wyn_naive
+```
+
+
+```{r}
+results <- bind_rows(wyn_naive,
+                     wyn_calib_kod2, 
+                     wyn_lasso1_kod2, 
+                     wyn_lasso2_kod2,
+                     wyn_alasso1_kod2,
+                     wyn_ecmc_kod2) %>%
+  mutate(komp = case_when(komp == "komp_kulturalne" ~ "Artistic",
+                          komp == "komp_dyspozycyjne"~ "Availability",
+                          komp == "komp_kognitywne" ~ "Cognitive",
+                          komp == "komp_komputerowe" ~ "Computer",
+                          komp == "komp_interpersonalne" ~ "Interpersonal",
+                          komp == "komp_kierownicze" ~ "Managerial",
+                          komp == "komp_matematyczne" ~ "Mathematical",
+                          komp == "komp_biurowe" ~ "Office",
+                          komp == "komp_fizyczne" ~ "Physical",
+                          komp == "komp_indywidualne" ~ "Self-organization",
+                          komp == "komp_techniczne"  ~ "Technical")) 
+```
+
+```{r}
+results %>%
+  group_by(komp, estim) %>%
+  summarise(m = mean(m)*100) %>%
+  spread(estim, m) %>%
+  select(comp = komp, naive, greg, ecmc, lasso1, lasso2, alasso1) %>%
+  xtable(digits = 1, 
+         caption = "Point estimates of fraction of skills for the pooled sample for 2011, 2013 and 2014",
+         label = "tab-results-pool")  %>%
+  print.xtable(include.rownames = F,
+               caption.placement = "top")
+``` 
+
+```{r}
+results %>%
+  group_by(komp, estim) %>%
+  summarise(m = sd(m)/mean(m)*100) %>%
+  spread(estim, m) %>%
+  select(comp = komp, greg, ecmc, lasso1, lasso2, alasso1) %>%
+  xtable(digits = 1, 
+         caption = "Average estimates of relative standard errors for skills for over 2011, 2013 and 2014",
+         label = "tab-results-pool")  %>%
+  print.xtable(include.rownames = F,
+               caption.placement = "top")
+```
+
+```{r}
+results %>%
+  mutate(estim = toupper(estim),
+         estim = factor(estim, c("NAIVE", "GREG","ECMC", "LASSO1","LASSO2","ALASSO1"),
+                        c("HTSRS","MCGREG","ECMC", "ECLASSO1","ECLASSO2","ECALASSO1"))) %>%
+  ggplot(data = ., aes(x = estim, y = m, ymin = q025, ymax = q975, color = estim, group = estim)) +
+  geom_errorbar(position = position_dodge(width = 1)) +
+  scale_color_brewer(type = "qual", palette = "Set1", name = "Estimators") +
+  geom_point(position = position_dodge(width = 1)) +
+  facet_grid(rok~komp) +
+  theme_bw() +
+  scale_y_continuous(label=scales::percent) +
+  labs(x = "Estimators", y = "Point estimates")  +
+  theme(axis.text.x = element_text(angle = 45, vjust =1, hjust= 1),
+        legend.position = "bottom") -> p
+
+
+ggsave(plot = p, file = "../results/fig-estims.png", width = 13)
+
+```
+
+```{r}
+results %>%
+  mutate(estim = toupper(estim),
+         estim = factor(estim, c("NAIVE", "GREG","ECMC", "LASSO1","LASSO2","ALASSO1"),
+                        c("HTSRS","MCGREG","ECMC", "ECLASSO1","ECLASSO2","ECALASSO1"))) %>%
+  ggplot(data = ., aes(x = rok, y = m, ymin = q025, ymax = q975, color = estim, group = estim)) +
+  geom_point() +
+  geom_line() + 
+  facet_wrap(~komp) +
+  scale_color_brewer(type = "qual", palette = "Set1", name = "Estimators") +
+  theme_bw() +
+  scale_y_continuous(label=scales::percent) +
+  labs(x = "Year", y = "Point estimate") -> p
+
+ggsave(plot = p, file = "../results/fig-dists.png", height = 5)
+```
+
+```{r}
+results %>%
+  group_by(komp, estim) %>%
+  summarise(m = mean(m)) %>%
+  group_by(estim) %>%
+  mutate(r = 12- rank(m, ties.method = "average")) %>%
+  select(-m) %>%
+  spread(estim, r) %>%
+  arrange(naive) %>%
+  select(komp, naive, greg:lasso2)
+```
+
+AUC
+```{r}
+
+komps <- c("komp_techniczne", "komp_matematyczne", "komp_kulturalne", "komp_komputerowe", 
+                             "komp_kognitywne", "komp_kierownicze", "komp_interpersonalne", 
+                             "komp_indywidualne", "komp_fizyczne", "komp_dyspozycyjne", "komp_biurowe")
+
+auc_lasso1 <- list()
+auc_lasso2 <- list()
+auc_alasso1 <- list()
+for (i in 1:11) {
+  auc_lasso1[[i]] <- res_lasso1_t$wynik_model %>%
+    map_dbl(~.[[i]]$metrics[.[[i]]$best.metric.index,] %>% max())
+  auc_lasso2[[i]] <- res_lasso2_t$wynik_model %>%
+    map_dbl(~.[[i]]$metrics[.[[i]]$best.metric.index,] %>% max())
+  auc_alasso1[[i]] <- res_alasso1_t$wynik_model %>%
+    map_dbl(~.[[i]]$metrics[.[[i]]$best.metric.index,] %>% max())
+} 
+
+
+data.frame(lasso1 = do.call('cbind',auc_lasso1) %>% apply(., 2, mean),
+           lasso2 = do.call('cbind',auc_lasso2) %>% apply(., 2, mean),
+           alasso1 = do.call('cbind',auc_alasso1) %>% apply(., 2, mean),
+           komp = komps)%>%
+  mutate(komp = case_when(komp == "komp_kulturalne" ~ "Artistic",
+                          komp == "komp_dyspozycyjne"~ "Availability",
+                          komp == "komp_kognitywne" ~ "Cognitive",
+                          komp == "komp_komputerowe" ~ "Computer",
+                          komp == "komp_interpersonalne" ~ "Interpersonal",
+                          komp == "komp_kierownicze" ~ "Managerial",
+                          komp == "komp_matematyczne" ~ "Mathematical",
+                          komp == "komp_biurowe" ~ "Office",
+                          komp == "komp_fizyczne" ~ "Physical",
+                          komp == "komp_indywidualne" ~ "Self-organization",
+                          komp == "komp_techniczne"  ~ "Technical"))  %>%
+  select(komp, lasso1, lasso2,alasso1) %>%
+  xtable(digits = 3, 
+         caption = "Quality of the model measured by Area Under Curve (AUC; average over 500 boostrap replicated)",
+         label = "tab-estim-auc") %>%
+  print.xtable(include.rownames = F,
+               caption.placement = "top")
+  
+
+
+
+```
+
